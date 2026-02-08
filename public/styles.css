@@ -141,9 +141,12 @@ button {
   background: var(--bg-hover);
 }
 
-.sidebar-conversations {
+#sidebar-content {
   flex: 1;
   overflow-y: auto;
+}
+
+.sidebar-conversations {
   padding: 8px;
 }
 
@@ -213,6 +216,264 @@ button {
 .sidebar-footer button:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* ===== Project Selector ===== */
+.sidebar-projects {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.project-selector {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.project-selector select {
+  flex: 1;
+  padding: 7px 28px 7px 10px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a1a1a1' stroke-width='2' xmlns='http://www.w3.org/2000/svg'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  transition: border-color var(--transition);
+}
+.project-selector select:hover { border-color: var(--border-light); }
+.project-selector select:focus { outline: none; border-color: var(--accent); }
+#new-project-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  transition: background var(--transition), color var(--transition);
+}
+#new-project-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* ===== Project View in Sidebar ===== */
+.project-header {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.project-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+.project-header h3 {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-header-actions {
+  display: flex;
+  gap: 2px;
+}
+.project-header-actions button {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  transition: background var(--transition), color var(--transition);
+}
+.project-header-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.project-description {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+.project-files-section {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.section-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+  margin-bottom: 6px;
+}
+.project-file-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.project-file-item .file-icon {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 8px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.project-instructions-summary {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+  max-height: 48px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.project-instructions-summary:hover {
+  color: var(--text-secondary);
+}
+
+/* ===== Project Modal ===== */
+.project-modal-content { max-width: 560px; }
+#project-name-input,
+#project-desc-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+#project-name-input:focus,
+#project-desc-input:focus { border-color: var(--accent); }
+#project-instructions-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color var(--transition);
+}
+#project-instructions-input:focus { border-color: var(--accent); }
+#project-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.project-file-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.project-file-entry .file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.project-file-entry .file-icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.project-file-entry .file-name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-file-entry .file-size {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.project-file-entry .remove-file-btn {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  font-size: 16px;
+  transition: background var(--transition), color var(--transition);
+}
+.project-file-entry .remove-file-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}
+.btn-secondary {
+  padding: 8px 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background var(--transition), color var(--transition);
+}
+.btn-secondary:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.btn-danger {
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--danger);
+  transition: background var(--transition);
+}
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+.project-modal-footer {
+  justify-content: space-between;
 }
 
 /* ===== Main Area ===== */
@@ -542,7 +803,7 @@ button {
 
 #message-input {
   width: 100%;
-  padding: 14px 56px 14px 18px;
+  padding: 14px 56px 14px 52px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -604,6 +865,195 @@ button {
   font-size: 11px;
   color: var(--text-tertiary);
   pointer-events: all;
+}
+
+/* ===== Attach Button ===== */
+#attach-btn {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--text-secondary);
+  transition: background var(--transition), color var(--transition);
+  z-index: 1;
+}
+#attach-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+#attach-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* ===== Attachment Previews ===== */
+#attachment-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 12px 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+#attachment-previews:not(.hidden) + #attach-btn + #message-input {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.attachment-preview {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  overflow: visible;
+  animation: fadeScale 0.2s ease;
+}
+.attachment-preview.image-preview {
+  width: 80px;
+  height: 80px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.attachment-preview.image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attachment-preview.file-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  max-width: 200px;
+}
+.attachment-preview .file-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+}
+.attachment-preview .file-info {
+  min-width: 0;
+}
+.attachment-preview .file-name {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+.attachment-preview .file-size {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.attachment-preview .remove-attachment {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  transition: background var(--transition), color var(--transition);
+  z-index: 1;
+  cursor: pointer;
+}
+.attachment-preview .remove-attachment:hover {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+/* Drag-over styling */
+#input-wrapper.drag-over #message-input {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+#input-wrapper.drag-over::after {
+  content: 'Drop files here';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(99, 102, 241, 0.08);
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 5;
+  pointer-events: none;
+}
+
+/* ===== Inline Attachments in Messages ===== */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.message-attachments:empty {
+  display: none;
+}
+.message-attachments img {
+  max-width: 300px;
+  max-height: 200px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: opacity var(--transition);
+}
+.message-attachments img:hover {
+  opacity: 0.85;
+}
+.message-attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.message-attachment-file .file-icon {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 600;
 }
 
 /* ===== Settings Modal ===== */

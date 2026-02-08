@@ -10,6 +10,8 @@ A modern, sleek chat interface for communicating with AI models through [OpenRou
 
 - **Multi-model support** — Access hundreds of AI models (Claude, GPT-4o, Gemini, Llama, DeepSeek, and more) through a single interface
 - **Streaming responses** — Real-time token-by-token output with a live cursor
+- **Projects** — Create project spaces with shared files and custom instructions (like Claude Projects / Grok Projects / Perplexity Spaces). All project context is automatically available to every chat within the project
+- **File attachments** — Attach images, PDFs, text files, and code to any chat via button, drag-and-drop, or clipboard paste
 - **Markdown rendering** — Full support for headings, code blocks, tables, lists, and blockquotes
 - **Code blocks with copy** — Syntax-highlighted code with language labels and one-click copy
 - **Conversation history** — Multiple conversations saved locally with sidebar navigation
@@ -39,7 +41,21 @@ npm install
 npm start
 ```
 
+Or run the server directly with Node:
+
+```bash
+node server.js
+```
+
 Then open **http://localhost:3000** in your browser.
+
+> **PowerShell users:** If you see a "running scripts is disabled on this system" error when using `npm start`, you can either run `node server.js` directly, or fix it for the current user:
+>
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+>
+> After that, `npm start` will work going forward.
 
 ### Setup
 
