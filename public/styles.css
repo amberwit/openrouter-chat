@@ -1196,6 +1196,23 @@ button {
   background: var(--bg-hover);
 }
 
+.setting-group .remember-key-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  cursor: pointer;
+}
+.remember-key-label input {
+  accent-color: var(--accent);
+}
+#api-key-status {
+  color: var(--danger);
+}
+#api-key-status:empty {
+  margin: 0;
+}
+
 #system-prompt-input {
   width: 100%;
   padding: 10px 14px;

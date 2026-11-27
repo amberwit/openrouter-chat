@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const { createCredentialStore, isApiKey } = require('./credential-store');
 
 const app = express();
 const HOST = '127.0.0.1';
@@ -14,6 +15,7 @@ const contentSecurityPolicy = [
 app.disable('trust proxy');
 app.disable('query parser');
 app.disable('x-powered-by');
+app.locals.credentialStore = createCredentialStore();
 app.use((req, res, next) => {
   res.set({
     'Content-Security-Policy': contentSecurityPolicy,
@@ -45,8 +47,29 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-function requireApiKey(req, res, next) {
-  if (!req.get('x-api-key')?.trim()) return res.status(400).json({ error: 'API key required' });
+function localOrigin(req) {
+  return `http://${req.get('host')}`;
+}
+
+const savedKeyError = 'Saved key can’t be used. Re-enter your OpenRouter key or forget it.';
+
+async function requireApiKey(req, res, next) {
+  const apiKey = req.get('x-api-key');
+  const savedKey = req.get('x-saved-key');
+  if (savedKey === undefined) {
+    if (!apiKey) return res.status(400).json({ error: 'API key required' });
+    if (!isApiKey(apiKey)) return res.status(400).json({ error: 'Invalid API key' });
+    res.locals.apiKey = apiKey;
+    return next();
+  }
+  if (apiKey !== undefined) return res.status(400).json({ error: 'Supply only one API credential' });
+  try {
+    const unsealed = await req.app.locals.credentialStore.unseal(savedKey, localOrigin(req));
+    if (!unsealed) return res.status(401).json({ error: savedKeyError, code: 'SAVED_KEY_INVALID' });
+    res.locals.apiKey = unsealed;
+  } catch {
+    return res.status(503).json({ error: 'Could not read private credential storage. Try again or use an API key for this tab.' });
+  }
   next();
 }
 
@@ -57,12 +80,29 @@ function requireJson(req, res, next) {
   next();
 }
 
+// Seal only a caller-supplied key. There is no route that returns the decrypted value.
+app.post('/api/credentials', async (req, res) => {
+  if (req.get('origin') !== localOrigin(req)) return res.status(403).json({ error: 'Use Settings in the local app to save a key' });
+  const apiKey = req.get('x-api-key');
+  if (!isApiKey(apiKey) || req.get('x-saved-key') !== undefined) {
+    return res.status(400).json({ error: 'Enter a valid API key to save it' });
+  }
+  try {
+    const savedKey = await req.app.locals.credentialStore.seal(apiKey, localOrigin(req));
+    res.json({ savedKey });
+  } catch {
+    res.status(503).json({ error: 'Could not securely save the key on this computer' });
+  }
+});
+
 // Proxy: fetch available models from OpenRouter
 app.get('/api/models', requireApiKey, async (req, res) => {
   try {
     const response = await fetch('https://openrouter.ai/api/v1/models', {
-      headers: { Authorization: `Bearer ${req.get('x-api-key')}` },
+      headers: { Authorization: `Bearer ${res.locals.apiKey}` },
+      redirect: 'error',
     });
+    if (!response.ok) return res.status(response.status).json({ error: 'OpenRouter could not load models' });
     const data = await response.json();
     res.json(data);
   } catch (err) {
@@ -87,9 +127,10 @@ app.post('/api/chat', requireApiKey, requireJson, express.json({ limit: '50mb', 
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
+      redirect: 'error',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${req.get('x-api-key')}`,
+        Authorization: `Bearer ${res.locals.apiKey}`,
         'HTTP-Referer': `http://${HOST}:${PORT}`,
         'X-Title': 'OpenRouter Chat',
       },

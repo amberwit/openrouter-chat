@@ -51,7 +51,7 @@ node server.js
 
 Then open **http://127.0.0.1:3000** in your browser. The server listens on IPv4 loopback only; it is not intended for LAN access, port forwarding, or use behind a reverse proxy.
 
-**Upgrading from an older build?** Stop the old server first. After starting the fixed build, open **http://localhost:3000** in the same browser profile if that is where your existing chats are stored. The fixed app still accepts this address when it resolves to IPv4. It removes only the previously saved API key on startup; chats, projects, and preferences remain on their original browser origin. `localhost` and `127.0.0.1` do not share browser storage. If you switch addresses, an empty history at the new address does not mean that the old history was deleted. Do not clear all site data to remove a key. If `localhost` is unavailable, use the browser's developer tools on the original origin to remove just `openrouter_api_key` from Local Storage, without loading the old build.
+**Upgrading from an older build?** Stop the old server first. After starting the fixed build, open **http://localhost:3000** in the same browser profile if that is where your existing chats are stored. The fixed app still accepts this address when it resolves to IPv4. It removes the old plaintext API key on startup; chats, projects, and preferences remain on their original browser origin. `localhost` and `127.0.0.1` do not share browser storage. If you switch addresses, an empty history at the new address does not mean that the old history was deleted. Do not clear all site data to remove a key. If `localhost` is unavailable, use the browser's developer tools on the original origin to remove just `openrouter_api_key` from Local Storage, without loading the old build.
 
 > **PowerShell users:** If you see a "running scripts is disabled on this system" error when using `npm start`, you can either run `node server.js` directly, or fix it for the current user:
 >
@@ -65,9 +65,9 @@ Then open **http://127.0.0.1:3000** in your browser. The server listens on IPv4 
 
 1. Click **Settings** (bottom-left corner)
 2. Paste your OpenRouter API key
-3. Click **Save Settings**
+3. Optionally turn on **Remember API key on this computer**, then click **Save Settings**
 4. Choose a model from the dropdown at the top
-5. Start chatting! Re-enter your key after reloading or closing the tab.
+5. Start chatting! If remembering is off, re-enter your key after reloading or closing the tab.
 
 ## Project Structure
 
@@ -83,7 +83,9 @@ openrouter-chat/
 
 ## How It Works
 
-The browser keeps your API key in the current tab's memory and sends it to the local proxy in an `X-Api-Key` request header. It is visible in browser developer tools while the app is in use. The proxy uses it to call OpenRouter over HTTPS and streams the response back. Consider a spending-limited OpenRouter key. If you suspect an old key was exposed, revoke it in OpenRouter and review your usage.
+The local proxy uses your credential to call OpenRouter over HTTPS and streams the response back. With **Remember** off (the default), a newly entered key stays in tab memory and is visible to browser developer tools in the local proxy request header. With **Remember** on, the browser stores an AES-GCM encrypted record. The proxy's random encryption key is stored separately in `~/.openrouter-chat/credential-key-v1`, under the operating-system user account running the server. On Unix the app requires private directory and file permissions; on Windows the app relies on the user profile's inherited permissions. No OS credential store is used. Store that directory on a local filesystem that supports hard links; if private storage cannot be created, use tab-only mode.
+
+The encrypted record works on the same installation and browser address after a reload or server restart. A copy of the browser data alone cannot decrypt the key, but a copy of both the record and the server's private file can. Treat the encrypted record as sensitive: a party who can submit it to this running local server can use the key without decrypting it themselves. This feature does not protect against compromised software running as your user. If the private file is lost, enter the API key again to create a new encrypted record. Turning **Remember** off and saving deletes the browser's persistent copy, but the current tab can keep chatting until reload. This does not revoke copies elsewhere or the key at OpenRouter. Consider a spending-limited key; revoke it and review usage if you suspect exposure.
 
 Chats, project files, and preferences are stored in the browser's `localStorage`, not in a server-side database. On each chat request, the conversation, system instructions, and attached context (including eligible project files) are sent through OpenRouter to the model provider. Do not include files or secrets you are unwilling to share with those services. Markdown libraries are served locally and model replies do not load remote images or other embedded media. HTTP(S) links still open their destinations when clicked. Only supported raster attachments are previewed; other types appear as file names.
 

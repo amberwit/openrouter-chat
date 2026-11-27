@@ -6,6 +6,7 @@ const { tmpdir } = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 const { setTimeout: delay } = require('node:timers/promises');
+const { createCredentialStore } = require('../credential-store');
 const app = require('../server');
 
 const browser = process.env.CHROMIUM_BIN;
@@ -19,7 +20,7 @@ async function until(check) {
   throw new Error(`Browser condition not reached: ${check}`);
 }
 
-test('browser renders untrusted data safely, blocks remote content, and retains history without retaining a key', {
+test('browser renders untrusted data safely and remembers credentials only when explicitly enabled', {
   skip: !browser && 'Set CHROMIUM_BIN to a Chromium browser executable',
   timeout: 30000,
 }, async (t) => {
@@ -29,11 +30,15 @@ test('browser renders untrusted data safely, blocks remote content, and retains 
     '[docs](https://example.invalid/docs)\n\n<p>raw markup</p>';
   const frame = (content) => new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`);
   let finishReply;
+  let modelStatus = 200;
+  const modelKeys = [];
   global.fetch = async (url, options) => {
-    assert.equal(options.headers.Authorization, 'Bearer mock-key');
     if (url === 'https://openrouter.ai/api/v1/models') {
+      modelKeys.push(options.headers.Authorization);
+      if (modelStatus !== 200) return new Response(null, { status: modelStatus });
       return Response.json({ data: [{ id: 'test/model', name: 'Mock model' }] });
     }
+    assert.equal(options.headers.Authorization, 'Bearer mock-key');
     assert.equal(url, 'https://openrouter.ai/api/v1/chat/completions');
     return new Response(new ReadableStream({
       start(controller) {
@@ -46,6 +51,16 @@ test('browser renders untrusted data safely, blocks remote content, and retains 
     }), { headers: { 'Content-Type': 'text/event-stream' } });
   };
   t.after(() => { global.fetch = realFetch; });
+
+  const keyRoot = await mkdtemp(path.join(tmpdir(), 'openrouter-browser-key-'));
+  const keyDirectory = path.join(keyRoot, 'private');
+  const originalStore = app.locals.credentialStore;
+  const store = createCredentialStore(keyDirectory);
+  app.locals.credentialStore = store;
+  t.after(async () => {
+    app.locals.credentialStore = originalStore;
+    await rm(keyRoot, { recursive: true, force: true });
+  });
 
   const server = app.listen(0, '127.0.0.1');
   t.after(() => {
@@ -227,4 +242,91 @@ test('browser renders untrusted data safely, blocks remote content, and retains 
   await cdp('Page.reload');
   await until(() => read('typeof DOMPurify === "undefined" && !!document.querySelector(".assistant .plain-text")'));
   assert.equal(await read('document.querySelector(".assistant .plain-text").textContent'), reply);
+
+  await cdp('Network.setBlockedURLs', { urls: ['https://*'] });
+  const storageKey = 'openrouter_saved_api_key_v1';
+  const stored = () => read(`localStorage.getItem(${JSON.stringify(storageKey)})`);
+  const settings = () => read('document.querySelector("#settings-btn").click()');
+  const save = () => read('document.querySelector("#save-settings").click()');
+  const on = (checked) => read(`document.querySelector('#remember-api-key').checked = ${checked};
+    document.querySelector('#remember-api-key').dispatchEvent(new Event('change'));`);
+  const enter = (value) => read(`document.querySelector('#api-key-input').value = ${JSON.stringify(value)}`);
+  const closed = () => until(() => read('document.querySelector("#settings-modal").classList.contains("hidden")'));
+  const enabled = () => until(() => read('!document.querySelector("#send-btn").disabled'));
+  assert.equal(await stored(), null);
+  await settings();
+  assert.equal(await read('document.querySelector("#remember-api-key").checked'), false);
+  await on(true);
+  await read('document.querySelector("#close-settings").click()');
+  await settings();
+  assert.equal(await read('document.querySelector("#remember-api-key").checked'), false);
+  await on(true);
+  await save();
+  assert.match(await read('document.querySelector("#api-key-status").textContent'), /Enter your OpenRouter API key/);
+  await enter('mock-remembered-key');
+  await save();
+  await closed();
+  await enabled();
+  const originalRecord = await stored();
+  assert.match(originalRecord, /^v1\.[\w-]+$/);
+  assert.equal(await read('JSON.stringify(localStorage).includes("mock-remembered-key")'), false);
+
+  app.locals.credentialStore = createCredentialStore(keyDirectory);
+  await cdp('Page.reload');
+  await enabled();
+  assert.equal(modelKeys.at(-1), 'Bearer mock-remembered-key');
+  await settings();
+  assert.equal(await read('document.querySelector("#remember-api-key").checked'), true);
+  assert.equal(await read('document.querySelector("#api-key-input").value'), '');
+  await save();
+  await closed();
+  assert.equal(await stored(), originalRecord);
+
+  app.locals.credentialStore = { ...store, seal: async () => { throw new Error('test storage failure'); } };
+  await settings();
+  await enter('mock-new-key');
+  await save();
+  await until(() => read('document.querySelector("#api-key-status").textContent.includes("previous key setting")'));
+  assert.equal(await stored(), originalRecord);
+  app.locals.credentialStore = store;
+  await save();
+  await closed();
+  await until(() => modelKeys.at(-1) === 'Bearer mock-new-key');
+  const replacementRecord = await stored();
+  assert.notEqual(replacementRecord, originalRecord);
+
+  modelStatus = 503;
+  await cdp('Page.reload');
+  await until(() => read('document.querySelector("#model-label")?.textContent.includes("Could not load models")'));
+  assert.equal(await stored(), replacementRecord);
+  modelStatus = 200;
+  await settings();
+  await save();
+  await closed();
+  await enabled();
+  assert.equal(modelKeys.at(-1), 'Bearer mock-new-key');
+
+  await settings();
+  await on(false);
+  await save();
+  await closed();
+  assert.equal(await stored(), null);
+  assert.equal(await read('document.querySelector("#send-btn").disabled'), false);
+  const modelCalls = modelKeys.length;
+  await cdp('Page.reload');
+  await ready();
+  assert.equal(await read('document.querySelector("#send-btn").disabled'), true);
+  assert.equal(modelKeys.length, modelCalls);
+  assert.ok(await read('JSON.parse(localStorage.getItem("openrouter_projects")).length'));
+
+  await read(`localStorage.setItem(${JSON.stringify(storageKey)}, 'v1.damaged')`);
+  await cdp('Page.reload');
+  await until(() => read('document.querySelector("#model-label")?.textContent.includes("Saved key can’t be used")'));
+  assert.equal(modelKeys.length, modelCalls);
+  assert.equal(await stored(), 'v1.damaged');
+  await settings();
+  await on(false);
+  await save();
+  await closed();
+  assert.equal(await stored(), null);
 });

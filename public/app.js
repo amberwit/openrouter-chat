@@ -1,8 +1,15 @@
 // ===== State =====
 // Older builds stored the key on this browser origin. Leave all other storage intact.
 localStorage.removeItem('openrouter_api_key');
+const savedKeyStorage = 'openrouter_saved_api_key_v1';
+const initialSavedKey = localStorage.getItem(savedKeyStorage);
+const savedKeyError = 'Saved key can’t be used. Re-enter your OpenRouter key or turn off remembering to forget it.';
 const state = {
-  apiKey: '',
+  savedKey: initialSavedKey,
+  credential: initialSavedKey !== null ? { header: 'X-Saved-Key', value: initialSavedKey } : null,
+  keyNotice: '',
+  savingSettings: false,
+  draftTheme: null,
   systemPrompt: localStorage.getItem('openrouter_system_prompt') || '',
   theme: localStorage.getItem('openrouter_theme') || 'dark',
   selectedModel: localStorage.getItem('openrouter_model') || '',
@@ -42,6 +49,9 @@ const els = {
   settingsModal: $('#settings-modal'),
   closeSettings: $('#close-settings'),
   apiKeyInput: $('#api-key-input'),
+  rememberKey: $('#remember-api-key'),
+  rememberKeyDesc: $('#remember-api-key-desc'),
+  apiKeyStatus: $('#api-key-status'),
   toggleKeyVis: $('#toggle-key-visibility'),
   systemPromptInput: $('#system-prompt-input'),
   saveSettings: $('#save-settings'),
@@ -76,6 +86,7 @@ function init() {
   if (convs.length > 0) {
     loadConversation(convs[0].id);
   }
+  if (state.credential) fetchModels();
 }
 
 // ===== Event Bindings =====
@@ -109,6 +120,7 @@ function bindEvents() {
   els.closeSettings.addEventListener('click', closeSettings);
   els.settingsModal.querySelector('.modal-backdrop').addEventListener('click', closeSettings);
   els.saveSettings.addEventListener('click', saveSettings);
+  els.rememberKey.addEventListener('change', updateRememberKeyDescription);
 
   // API key visibility toggle
   els.toggleKeyVis.addEventListener('click', () => {
@@ -121,7 +133,7 @@ function bindEvents() {
     btn.addEventListener('click', () => {
       $$('.theme-btn').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      state.theme = btn.dataset.theme;
+      state.draftTheme = btn.dataset.theme;
     });
   });
 
@@ -268,28 +280,54 @@ function createModelOption(model) {
 }
 
 async function fetchModels() {
-  const apiKey = state.apiKey;
+  const credential = state.credential;
+  if (!credential) return;
   try {
     const res = await fetch('/api/models', {
-      headers: { 'X-Api-Key': apiKey },
+      headers: credentialHeaders(credential),
     });
     const data = await res.json();
-    if (state.apiKey !== apiKey) return;
+    if (state.credential !== credential) return;
 
-    if (data.error) {
-      console.error('Error fetching models:', data.error);
+    if (rejectInvalidSavedKey(credential, res, data)) return;
+    if (!res.ok || !Array.isArray(data.data)) {
+      showKeyNotice('Could not load models. Check your key or try again in Settings.');
       return;
     }
+    showKeyNotice('');
 
     const preferredModel = state.models.length ? state.selectedModel : getCurrentConv()?.model || state.selectedModel;
-    state.models = (data.data || [])
+    state.models = data.data
       .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
 
     populateModelSelector(preferredModel);
     enableInput();
-  } catch (err) {
-    console.error('Failed to fetch models:', err);
+  } catch {
+    if (state.credential === credential) showKeyNotice('Could not load models. Try again in Settings.');
   }
+}
+
+function credentialHeaders(credential) {
+  return { [credential.header]: credential.value };
+}
+
+function showKeyNotice(message) {
+  state.keyNotice = message;
+  els.modelLabel.textContent = message || (state.models.find((m) => m.id === state.selectedModel)?.name || state.selectedModel);
+  if (!els.settingsModal.classList.contains('hidden')) els.apiKeyStatus.textContent = message;
+}
+
+function rejectInvalidSavedKey(credential, response, data) {
+  if (credential.header !== 'X-Saved-Key' || response.status !== 401 || data?.code !== 'SAVED_KEY_INVALID') return false;
+  if (state.credential === credential) {
+    state.credential = null;
+    els.modelSelector.disabled = true;
+    els.messageInput.disabled = true;
+    els.sendBtn.disabled = true;
+    els.attachBtn.disabled = true;
+    showKeyNotice(savedKeyError);
+  }
+  return true;
 }
 
 function populateModelSelector(preferredModel) {
@@ -1119,7 +1157,8 @@ async function sendMessage() {
 
   if ((!text && attachments.length === 0) || state.isStreaming) return;
 
-  if (!state.apiKey) {
+  const credential = state.credential;
+  if (!credential) {
     openSettings();
     return;
   }
@@ -1198,14 +1237,15 @@ async function sendMessage() {
     if (!els.reasoningEffort.disabled && effort) payload.reasoning = { effort };
     const res = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Api-Key': state.apiKey },
+      headers: { 'Content-Type': 'application/json', ...credentialHeaders(credential) },
       body: JSON.stringify(payload),
       signal: state.abortController.signal,
     });
 
     if (!res.ok) {
-      const errData = await res.text();
-      throw new Error(errData || `HTTP ${res.status}`);
+      const data = await res.json().catch(() => null);
+      if (rejectInvalidSavedKey(credential, res, data)) throw new Error(savedKeyError);
+      throw new Error(data?.error || `HTTP ${res.status}`);
     }
 
     const reader = res.body.getReader();
@@ -1260,7 +1300,7 @@ async function sendMessage() {
     state.abortController = null;
     els.sendBtn.classList.remove('hidden');
     els.stopBtn.classList.add('hidden');
-    els.messageInput.disabled = false;
+    els.messageInput.disabled = !state.credential;
     els.messageInput.focus();
   }
 }
@@ -1272,26 +1312,103 @@ function stopStreaming() {
 // ===== Settings =====
 function openSettings() {
   els.settingsModal.classList.remove('hidden');
-  els.apiKeyInput.placeholder = state.apiKey ? 'Key set for this tab; leave blank to keep it' : 'sk-or-v1-...';
+  els.apiKeyInput.placeholder = state.credential ? 'Key in use; leave blank to keep it' : 'sk-or-v1-...';
+  els.rememberKey.checked = state.savedKey !== null;
+  updateRememberKeyDescription();
+  els.apiKeyStatus.textContent = state.keyNotice;
   els.systemPromptInput.value = state.systemPrompt;
+  state.draftTheme = state.theme;
+  $$('.theme-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.theme === state.theme));
   els.apiKeyInput.focus();
 }
 
+function updateRememberKeyDescription() {
+  els.rememberKeyDesc.textContent = els.rememberKey.checked
+    ? 'On: Best choice for a private machine'
+    : 'Off: Best choice for a public machine';
+}
+
 function closeSettings() {
+  if (state.savingSettings) return;
   els.apiKeyInput.value = '';
   els.apiKeyInput.type = 'password';
   els.settingsModal.classList.add('hidden');
 }
 
-function saveSettings() {
-  const newKey = els.apiKeyInput.value.trim() || state.apiKey;
-  const keyChanged = newKey !== state.apiKey;
-  state.apiKey = newKey;
-  state.systemPrompt = els.systemPromptInput.value.trim();
-  localStorage.setItem('openrouter_system_prompt', state.systemPrompt);
-  applyTheme(state.theme);
-  if (keyChanged && state.apiKey) fetchModels();
+async function saveSettings() {
+  if (state.savingSettings) return;
+  const enteredKey = els.apiKeyInput.value.trim();
+  const remember = els.rememberKey.checked;
+  if (enteredKey && (enteredKey.length > 512 || /[^!-~]/.test(enteredKey))) {
+    els.apiKeyStatus.textContent = 'Enter a valid OpenRouter API key without spaces.';
+    return;
+  }
+  const previous = state.credential;
+  const systemPrompt = els.systemPromptInput.value.trim();
+  const theme = state.draftTheme;
+  let credential = previous;
+  let savedKey = state.savedKey;
+  let saved = false;
+  state.savingSettings = true;
+  els.saveSettings.disabled = true;
+  els.apiKeyInput.disabled = true;
+  els.rememberKey.disabled = true;
+  try {
+    if (remember && (enteredKey || savedKey === null)) {
+      const apiKey = enteredKey || (previous?.header === 'X-Api-Key' ? previous.value : '');
+      if (apiKey) {
+        const res = await fetch('/api/credentials', {
+          method: 'POST',
+          headers: { 'X-Api-Key': apiKey },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!res.ok) throw new Error('Encryption failed');
+        ({ savedKey } = await res.json());
+        if (typeof savedKey !== 'string' || !/^v1\.[\w-]+$/.test(savedKey)) throw new Error('Invalid encrypted key response');
+        credential = { header: 'X-Saved-Key', value: savedKey };
+      } else if (previous?.header === 'X-Saved-Key') {
+        // The same tab can re-enable remembering after turning it off.
+        savedKey = previous.value;
+      } else {
+        els.apiKeyStatus.textContent = 'Enter your OpenRouter API key before turning on remembering.';
+        return;
+      }
+      localStorage.setItem(savedKeyStorage, savedKey);
+    } else if (!remember) {
+      if (savedKey !== null) localStorage.removeItem(savedKeyStorage);
+      savedKey = null;
+      if (enteredKey) credential = { header: 'X-Api-Key', value: enteredKey };
+    }
+    state.savedKey = savedKey;
+    state.credential = credential;
+    saved = true;
+  } catch {
+    els.apiKeyStatus.textContent = 'Could not change how the key is saved. The previous key setting is unchanged.' +
+      (remember ? ' To use the entered key for this tab only, switch remembering off and save again.' : '');
+  } finally {
+    state.savingSettings = false;
+    els.saveSettings.disabled = false;
+    els.apiKeyInput.disabled = false;
+    els.rememberKey.disabled = false;
+  }
+  if (!saved) return;
+
+  const retry = Boolean(state.keyNotice);
+  if (previous !== credential || savedKey === null) showKeyNotice('');
+  try {
+    localStorage.setItem('openrouter_system_prompt', systemPrompt);
+    state.systemPrompt = systemPrompt;
+    applyTheme(theme);
+    state.theme = theme;
+  } catch {
+    els.apiKeyStatus.textContent = 'The API key setting was applied, but other settings could not be saved.';
+    els.apiKeyInput.value = '';
+    els.apiKeyInput.type = 'password';
+    if (credential && (previous !== credential || retry)) fetchModels();
+    return;
+  }
   closeSettings();
+  if (credential && (previous !== credential || retry)) fetchModels();
 }
 
 // ===== Start =====

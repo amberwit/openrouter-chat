@@ -145,15 +145,20 @@
           <div class="setting-group">
             <label for="api-key-input">OpenRouter API Key</label>
             <p class="setting-desc">Get your key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a></p>
-            <p class="setting-desc">The key is kept in this tab until you reload or close it.</p>
             <div class="api-key-field">
-              <input type="password" id="api-key-input" placeholder="sk-or-v1-..." autocomplete="off">
+              <input type="password" id="api-key-input" placeholder="sk-or-v1-..." autocomplete="off" maxlength="512">
               <button id="toggle-key-visibility" title="Show/hide key">
                 <svg id="eye-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
                 </svg>
               </button>
             </div>
+            <label class="remember-key-label" for="remember-api-key">
+              <input type="checkbox" role="switch" id="remember-api-key" aria-describedby="remember-api-key-desc">
+              Remember API key on this computer
+            </label>
+            <p class="setting-desc" id="remember-api-key-desc">Off: Reloading or closing the tab forgets the key.</p>
+            <p id="api-key-status" class="setting-desc" role="status" aria-live="polite"></p>
           </div>
           <div class="setting-group">
             <label for="system-prompt-input">System Prompt (optional)</label>
