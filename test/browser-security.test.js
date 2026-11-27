@@ -20,7 +20,7 @@ async function until(check) {
   throw new Error(`Browser condition not reached: ${check}`);
 }
 
-test('browser renders untrusted data safely and remembers credentials only when explicitly enabled', {
+test('browser renders safely, remembers credentials on opt-in, and restores submitted chat turns', {
   skip: !browser && 'Set CHROMIUM_BIN to a Chromium browser executable',
   timeout: 30000,
 }, async (t) => {
@@ -32,19 +32,45 @@ test('browser renders untrusted data safely and remembers credentials only when 
   let finishReply;
   let modelStatus = 200;
   const modelKeys = [];
+  const chatRequests = [];
+  let startDisconnect;
   global.fetch = async (url, options) => {
     if (url === 'https://openrouter.ai/api/v1/models') {
       modelKeys.push(options.headers.Authorization);
       if (modelStatus !== 200) return new Response(null, { status: modelStatus });
-      return Response.json({ data: [{ id: 'test/model', name: 'Mock model' }] });
+      return Response.json({ data: [
+        { id: 'test/model', name: 'Mock model', reasoning: { supported_efforts: ['high'] } },
+        { id: 'test/other', name: 'Other model', reasoning: { supported_efforts: ['low', 'none'] } },
+      ] });
     }
     assert.equal(options.headers.Authorization, 'Bearer mock-key');
     assert.equal(url, 'https://openrouter.ai/api/v1/chat/completions');
+    const payload = JSON.parse(options.body);
+    chatRequests.push(payload);
+    const prompt = payload.messages.at(-1).content;
+    const done = new TextEncoder().encode('data: [DONE]\n\n');
+    if (prompt === 'Failed query') return Response.json({ error: 'Mock upstream failure' }, { status: 503 });
+    if (prompt === 'Empty query') return new Response(done);
+    if (prompt === 'Next query') return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(frame('A reply'));
+      controller.enqueue(done);
+      controller.close();
+    } }));
+    if (['Project partial', 'Before text', 'Reload pending', 'Timeout before text'].includes(prompt)) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(frame(prompt === 'Project partial' ? 'Partial text' : ''));
+          if (prompt === 'Project partial') startDisconnect = () => controller.close();
+        },
+      }));
+    }
+    assert.equal(prompt, 'Test prompt');
     return new Response(new ReadableStream({
       start(controller) {
         controller.enqueue(frame('# Completed reply'));
         finishReply = () => {
           controller.enqueue(frame(reply.slice('# Completed reply'.length)));
+          controller.enqueue(done);
           controller.close();
         };
       },
@@ -208,7 +234,7 @@ test('browser renders untrusted data safely and remembers credentials only when 
   await until(() => read('!!document.querySelector(".assistant .message-content table")'));
 
   const inspectReply = `(() => {
-    const reply = document.querySelector('.assistant .message-content');
+    const reply = document.querySelector('.assistant .message-content:not(.missing-reply)');
     const label = reply.querySelector('.code-header > span');
     return {
       heading: reply.querySelector('h1').textContent,
@@ -240,8 +266,8 @@ test('browser renders untrusted data safely and remembers credentials only when 
 
   await cdp('Network.setBlockedURLs', { urls: ['https://*', `${base}/vendor/purify.js`] });
   await cdp('Page.reload');
-  await until(() => read('typeof DOMPurify === "undefined" && !!document.querySelector(".assistant .plain-text")'));
-  assert.equal(await read('document.querySelector(".assistant .plain-text").textContent'), reply);
+  await until(() => read('typeof DOMPurify === "undefined" && !!document.querySelector(".assistant .plain-text:not(.missing-reply)")'));
+  assert.equal(await read('document.querySelector(".assistant .plain-text:not(.missing-reply)").textContent'), reply);
 
   await cdp('Network.setBlockedURLs', { urls: ['https://*'] });
   const storageKey = 'openrouter_saved_api_key_v1';
@@ -329,4 +355,113 @@ test('browser renders untrusted data safely and remembers credentials only when 
   await save();
   await closed();
   assert.equal(await stored(), null);
+
+  await settings();
+  await enter('mock-key');
+  await save();
+  await closed();
+  await enabled();
+  const choose = (selector, value) => read(`(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    el.value = ${JSON.stringify(value)};
+    el.dispatchEvent(new Event('change'));
+  })()`);
+  const send = (prompt) => read(`document.querySelector('#message-input').value = ${JSON.stringify(prompt)};
+    document.querySelector('#send-btn').click();`);
+  const lastTurn = () => read('JSON.parse(localStorage.getItem("openrouter_conversations"))[0].messages.at(-1).turn');
+  const lastReply = () => read(`(() => {
+    const reply = [...document.querySelectorAll('.message.assistant')].at(-1);
+    return [reply.querySelector('.message-content').textContent.trim(), reply.querySelector('.message-meta')?.title || ''];
+  })()`);
+  const finished = () => until(() => read('!state.activeRequest'));
+
+  const beforeFailure = chatRequests.length;
+  await read(`window.alert = (message) => { window.storageWarning = message; };
+    window.realStorageWrite = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'openrouter_conversations') throw new DOMException('Mock quota failure', 'QuotaExceededError');
+      return window.realStorageWrite.call(this, key, value);
+    };`);
+  await send('Unsaved draft');
+  assert.match(await read('window.storageWarning'), /Could not save/);
+  assert.equal(await read('document.querySelector("#message-input").value'), 'Unsaved draft');
+  assert.equal(chatRequests.length, beforeFailure);
+  await read('Storage.prototype.setItem = window.realStorageWrite');
+
+  await choose('#model-selector', 'test/other');
+  await choose('#reasoning-effort', 'none');
+  assert.equal((await lastTurn()).preference.model, 'test/model');
+  await send('Failed query');
+  await finished();
+  assert.deepEqual(await lastReply(), ['Response missing or not received.', 'Requested model: test/other']);
+  assert.equal((await lastTurn()).status, 'missing');
+  assert.deepEqual(chatRequests.at(-1).reasoning, { effort: 'none' });
+
+  await send('Next query');
+  await finished();
+  assert.deepEqual(await lastReply(), ['A reply', '']);
+  assert.ok(chatRequests.at(-1).messages.every((msg) => Object.keys(msg).length === 2));
+  assert.ok(!JSON.stringify(chatRequests.at(-1)).includes('Response missing or not received.'));
+  await choose('#reasoning-effort', '');
+  await send('Empty query');
+  await finished();
+  assert.deepEqual(await lastReply(), ['Response missing or not received.', 'Requested model: test/other']);
+  assert.equal((await lastTurn()).preference.effort, null);
+  assert.equal(chatRequests.at(-1).reasoning, undefined);
+
+  await send('Before text');
+  await until(() => chatRequests.at(-1).messages.at(-1).content === 'Before text');
+  await read('document.querySelector("#stop-btn").click()');
+  await finished();
+  assert.equal((await lastTurn()).interruption, 'The reply was stopped.');
+
+  await read(`window.realTimeout = window.setTimeout;
+    window.setTimeout = (handler, ms, ...args) => window.realTimeout(handler, ms === 120000 ? 100 : ms, ...args);`);
+  await send('Timeout before text');
+  await finished();
+  assert.equal((await lastTurn()).interruption, 'The reply timed out.');
+  await read('window.setTimeout = window.realTimeout');
+
+  const project = await read('JSON.parse(localStorage.getItem("openrouter_projects"))[0].id');
+  await choose('#project-selector', project);
+  await choose('#model-selector', 'test/model');
+  await choose('#reasoning-effort', 'high');
+  await send('Project partial');
+  await until(() => read('document.querySelector(".streaming .message-content")?.textContent === "Partial text"'));
+  await choose('#model-selector', 'test/other');
+  await choose('#reasoning-effort', 'none');
+  assert.deepEqual(await lastReply(), ['Partial text', 'Requested model: test/model']);
+  assert.equal(chatRequests.at(-1).model, 'test/model');
+  assert.deepEqual(chatRequests.at(-1).reasoning, { effort: 'high' });
+  await choose('#project-selector', '');
+  startDisconnect();
+  await finished();
+  await choose('#project-selector', project);
+  assert.deepEqual(await lastReply(), ['Partial text', 'Requested model: test/model']);
+  const projectTurn = await read('JSON.parse(localStorage.getItem("openrouter_projects"))[0].conversations[0].messages[0].turn');
+  assert.equal(projectTurn.status, 'interrupted');
+  assert.equal(projectTurn.preference.effort, 'high');
+  assert.equal(await read('document.querySelector("#reasoning-effort").value'), 'high');
+
+  await choose('#project-selector', '');
+  await choose('#reasoning-effort', 'low');
+  await send('Reload pending');
+  await until(() => chatRequests.at(-1).messages.at(-1).content === 'Reload pending');
+  assert.equal((await lastTurn()).status, 'pending');
+  await cdp('Page.reload');
+  await ready();
+  assert.deepEqual(await lastReply(), ['Response missing or not received.', 'Requested model: test/other']);
+  await settings();
+  await enter('mock-key');
+  await save();
+  await closed();
+  await enabled();
+  assert.equal(await read('document.querySelector("#model-selector").value'), 'test/other');
+  assert.equal(await read('document.querySelector("#reasoning-effort").value'), 'low');
+  assert.equal((await lastTurn()).status, 'pending');
+  const missingCount = await read('document.querySelectorAll(".missing-reply").length');
+  const savedTranscript = await read('localStorage.getItem("openrouter_conversations")');
+  await read('document.querySelector(".conv-item.active").click()');
+  assert.equal(await read('document.querySelectorAll(".missing-reply").length'), missingCount);
+  assert.equal(await read('localStorage.getItem("openrouter_conversations")'), savedTranscript);
 });

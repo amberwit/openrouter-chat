@@ -15,9 +15,9 @@ const state = {
   selectedModel: localStorage.getItem('openrouter_model') || '',
   conversations: JSON.parse(localStorage.getItem('openrouter_conversations') || '[]'),
   currentConvId: null,
+  pendingPreferenceRestore: false,
   models: [],
-  isStreaming: false,
-  abortController: null,
+  activeRequest: null,
   pendingAttachments: [],
   projects: JSON.parse(localStorage.getItem('openrouter_projects') || '[]'),
   currentProjectId: null,
@@ -110,10 +110,13 @@ function bindEvents() {
 
   // Model selector
   els.modelSelector.addEventListener('change', (e) => {
+    const effort = els.reasoningEffort.value;
+    state.pendingPreferenceRestore = false;
     state.selectedModel = e.target.value;
     localStorage.setItem('openrouter_model', state.selectedModel);
-    updateModelControls();
+    updateModelControls(effort);
   });
+  els.reasoningEffort.addEventListener('change', () => { state.pendingPreferenceRestore = false; });
 
   // Settings
   els.settingsBtn.addEventListener('click', openSettings);
@@ -296,11 +299,11 @@ async function fetchModels() {
     }
     showKeyNotice('');
 
-    const preferredModel = state.models.length ? state.selectedModel : getCurrentConv()?.model || state.selectedModel;
     state.models = data.data
       .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
 
-    populateModelSelector(preferredModel);
+    populateModelSelector(state.selectedModel);
+    if (state.pendingPreferenceRestore && state.models.length) restoreConversationPreference(getCurrentConv());
     enableInput();
   } catch {
     if (state.credential === credential) showKeyNotice('Could not load models. Try again in Settings.');
@@ -388,16 +391,19 @@ function populateModelSelector(preferredModel) {
   updateModelControls();
 }
 
-function updateModelControls() {
-  const model = state.models.find((m) => m.id === state.selectedModel);
-  els.modelLabel.textContent = model ? (model.name || model.id) : '';
-
+function modelReasoningEfforts(model) {
   const capabilities = model?.reasoning;
   const supported = capabilities?.supported_efforts;
-  const efforts = (supported === null ? reasoningEfforts : Array.isArray(supported) ? supported : [])
+  return (supported === null ? reasoningEfforts : Array.isArray(supported) ? supported : [])
     .filter((effort) => reasoningEfforts.includes(effort) && !(capabilities.mandatory && effort === 'none'));
+}
+
+function updateModelControls(preferredEffort) {
+  const model = state.models.find((m) => m.id === state.selectedModel);
+  els.modelLabel.textContent = model ? (model.name || model.id) : '';
+  const efforts = modelReasoningEfforts(model);
   const selector = els.reasoningEffort;
-  const previous = selector.dataset.model === model?.id ? selector.value : '';
+  const previous = preferredEffort !== undefined ? preferredEffort : selector.dataset.model === model?.id ? selector.value : '';
   selector.dataset.model = model?.id || '';
   selector.replaceChildren(new Option('Model default', ''));
   efforts.forEach((effort) => selector.appendChild(new Option(reasoningEffortLabels[effort], effort)));
@@ -408,7 +414,7 @@ function updateModelControls() {
 
 // ===== Input =====
 function enableInput() {
-  els.messageInput.disabled = false;
+  els.messageInput.disabled = Boolean(state.activeRequest);
   els.sendBtn.disabled = false;
   els.attachBtn.disabled = false;
   els.messageInput.placeholder = 'Send a message...';
@@ -474,12 +480,8 @@ function getCurrentProject() {
   return state.currentProjectId ? getProject(state.currentProjectId) : null;
 }
 
-function saveCurrentConversations() {
-  if (state.currentProjectId) {
-    saveProjects();
-  } else {
-    saveConversations();
-  }
+function saveConversationHistory(projectId, reportError = true) {
+  return projectId ? saveProjects(reportError) : saveConversations(reportError);
 }
 
 // ===== File Attachments =====
@@ -612,7 +614,7 @@ function renderProjectSelector() {
   }
 }
 
-function saveProjects() {
+function saveProjects(reportError = true) {
   state.projects.forEach((project) => {
     project.conversations.forEach((conv) => {
       conv.messages.forEach((msg, idx) => {
@@ -624,8 +626,10 @@ function saveProjects() {
   });
   try {
     localStorage.setItem('openrouter_projects', JSON.stringify(state.projects));
-  } catch (e) {
-    alert('Storage is full. Try deleting old conversations or project files.');
+    return true;
+  } catch {
+    if (reportError) alert('Could not save project history. Try freeing browser storage.');
+    return false;
   }
 }
 
@@ -866,6 +870,8 @@ function renderConversationListInto(container, conversations) {
 // ===== Conversations =====
 function newChat() {
   state.currentConvId = null;
+  state.pendingPreferenceRestore = false;
+  updateModelControls(null);
   clearAttachments();
   renderMessages([]);
   els.welcome.classList.remove('hidden');
@@ -873,29 +879,13 @@ function newChat() {
   els.messageInput.focus();
 }
 
-function createConversation(firstMessage) {
-  const conv = {
+function createConversation(firstMessage, message) {
+  return {
     id: generateId('conv'),
     title: firstMessage.slice(0, 80),
-    messages: [],
-    model: state.selectedModel,
+    messages: [message],
     createdAt: Date.now(),
   };
-
-  if (state.currentProjectId) {
-    const project = getCurrentProject();
-    if (project) {
-      project.conversations.unshift(conv);
-      saveProjects();
-    }
-  } else {
-    state.conversations.unshift(conv);
-    saveConversations();
-  }
-
-  state.currentConvId = conv.id;
-  renderSidebarContent();
-  return conv;
 }
 
 function getCurrentConv() {
@@ -908,14 +898,32 @@ function loadConversation(id) {
   const conv = getCurrentConv();
   if (!conv) return;
 
-  if (conv.model && state.models.find((m) => m.id === conv.model)) {
-    els.modelSelector.value = conv.model;
-    state.selectedModel = conv.model;
-    updateModelControls();
-  }
-
+  restoreConversationPreference(conv);
   renderMessages(conv.messages);
   renderSidebarContent();
+}
+
+function queryPreference(message) {
+  const preference = message.role === 'user' && message.turn?.preference;
+  if (!preference || typeof preference.model !== 'string' || !preference.model.trim()) return null;
+  return preference.effort === null || reasoningEfforts.includes(preference.effort) ? preference : null;
+}
+
+function latestQueryPreference(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const preference = queryPreference(messages[i]);
+    if (preference) return preference;
+  }
+  return null;
+}
+
+function restoreConversationPreference(conv) {
+  const preference = conv && latestQueryPreference(conv.messages);
+  state.pendingPreferenceRestore = Boolean(preference && !state.models.length);
+  if (!preference || !state.models.some((model) => model.id === preference.model)) return;
+  els.modelSelector.value = preference.model;
+  state.selectedModel = preference.model;
+  updateModelControls(preference.effort);
 }
 
 function deleteConversation(id, e) {
@@ -938,7 +946,7 @@ function deleteConversation(id, e) {
   renderSidebarContent();
 }
 
-function saveConversations() {
+function saveConversations(reportError = true) {
   state.conversations.forEach((conv) => {
     conv.messages.forEach((msg, idx) => {
       if (msg.attachmentMeta && idx < conv.messages.length - 10) {
@@ -948,33 +956,113 @@ function saveConversations() {
   });
   try {
     localStorage.setItem('openrouter_conversations', JSON.stringify(state.conversations));
-  } catch (e) {
-    alert('Storage is full. Try deleting old conversations.');
+    return true;
+  } catch {
+    if (reportError) alert('Could not save chat history. Try freeing browser storage.');
+    return false;
   }
 }
 
 // ===== Messages =====
+const missingReplyText = 'Response missing or not received.';
+
+function hasReplyText(content) {
+  return extractTextFromContent(content).trim().length > 0;
+}
+
+function savedTurn(message) {
+  return message.turn && typeof message.turn === 'object' && !Array.isArray(message.turn) ? message.turn : null;
+}
+
+function changedPreference(previous, preference) {
+  return preference && (!previous || previous.model !== preference.model || previous.effort !== preference.effort)
+    ? preference : null;
+}
+
+function conversationRows(messages) {
+  const rows = [];
+  let previous = null;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    rows.push({ message });
+    if (message.role !== 'user') continue;
+
+    const preference = queryPreference(message);
+    const footer = changedPreference(previous, preference);
+    if (preference) previous = preference;
+    const turn = savedTurn(message);
+    if (turn) {
+      rows.push({ turn, footer });
+    } else {
+      const reply = messages[i + 1];
+      if (reply?.role === 'assistant') {
+        i++;
+        if (hasReplyText(reply.content)) {
+          rows.push({ message: reply });
+          continue;
+        }
+      }
+      rows.push({ turn: { status: 'missing' }, footer });
+    }
+  }
+  return rows;
+}
+
 function renderMessages(messages) {
   els.messages.innerHTML = '';
   if (messages.length === 0) {
-    els.messages.appendChild(els.welcome || createWelcomeEl());
-    els.welcome = $('#welcome');
+    els.messages.appendChild(els.welcome);
     els.welcome.classList.remove('hidden');
-    $$('.hint-card').forEach((card) => {
-      card.addEventListener('click', () => {
-        els.messageInput.value = card.dataset.prompt;
-        autoResize();
-        els.messageInput.focus();
-      });
-    });
     return;
   }
 
   els.welcome && els.welcome.classList.add('hidden');
-  messages.forEach((msg) => {
-    appendMessageEl(msg.role, msg.content, msg.attachmentMeta, msg.displayText);
+  conversationRows(messages).forEach(({ message, turn, footer }) => {
+    if (turn) appendTurnReply(turn, footer);
+    else appendMessageEl(message.role, message.content, message.attachmentMeta, message.displayText);
   });
   scrollToBottom();
+}
+
+function appendTurnReply(turn, footer) {
+  const element = appendMessageEl('assistant', '');
+  renderTurnReply(element, turn, footer);
+  return element;
+}
+
+function renderTurnReply(element, turn, footer) {
+  const content = element.querySelector('.message-content');
+  const active = state.activeRequest?.turn === turn;
+  const text = active ? state.activeRequest.text : turn.content;
+  const hasText = hasReplyText(text);
+  element.classList.toggle('streaming', active);
+  content.classList.toggle('missing-reply', !active && !hasText);
+
+  if (active) {
+    renderPlainText(content, text || '');
+    state.activeRequest.contentEl = content;
+  } else if (hasText) {
+    renderAssistantReply(content, text);
+  } else {
+    renderPlainText(content, missingReplyText);
+    if (turn.interruption) content.title = turn.interruption;
+  }
+
+  const notes = [];
+  if (footer) {
+    notes.push(typeof footer.modelName === 'string' && footer.modelName ? footer.modelName : footer.model);
+    if (footer.effort === 'none') notes.push('Effort: None');
+    else if (footer.effort) notes.push(`${reasoningEffortLabels[footer.effort]} effort`);
+  }
+  if (!active && hasText && turn.status !== 'complete') notes.push('Reply interrupted');
+  if (!active && Number.isFinite(turn.elapsedMs)) notes.push(`${(turn.elapsedMs / 1000).toFixed(1)}s`);
+  element.querySelector('.message-meta')?.remove();
+  if (notes.length) {
+    const meta = makeElement('div', 'message-meta', notes.join(' · '));
+    if (footer) meta.title = `Requested model: ${footer.model}`;
+    element.querySelector('.message-body').appendChild(meta);
+  }
+  if (active) state.activeRequest.replyEl = element;
 }
 
 function appendMessageEl(role, content, attachmentMeta, displayText) {
@@ -1017,7 +1105,7 @@ function appendMessageEl(role, content, attachmentMeta, displayText) {
 function extractTextFromContent(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+    return content.filter((p) => p?.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('\n');
   }
   return '';
 }
@@ -1144,18 +1232,27 @@ function buildApiMessages(conv) {
 
   // 3. Conversation messages
   conv.messages.forEach((m) => {
-    messages.push({ role: m.role, content: m.content });
+    if (m.role === 'user') {
+      messages.push({ role: m.role, content: m.content });
+      const turn = savedTurn(m);
+      if (hasReplyText(turn?.content)) messages.push({ role: 'assistant', content: turn.content });
+    } else if (m.role === 'assistant' && hasReplyText(m.content)) {
+      messages.push({ role: m.role, content: m.content });
+    }
   });
 
   return messages;
 }
 
 // ===== Send Message =====
+const replyTimeoutMs = 120_000;
+const replyCheckpointMs = 2_000;
+
 async function sendMessage() {
   const text = els.messageInput.value.trim();
   const attachments = [...state.pendingAttachments];
 
-  if ((!text && attachments.length === 0) || state.isStreaming) return;
+  if ((!text && attachments.length === 0) || state.activeRequest) return;
 
   const credential = state.credential;
   if (!credential) {
@@ -1163,12 +1260,18 @@ async function sendMessage() {
     return;
   }
 
-  const displayText = text || '(attached files)';
-  if (!state.currentConvId) {
-    createConversation(displayText);
-  }
-
-  const conv = getCurrentConv();
+  const model = state.models.find((entry) => entry.id === state.selectedModel);
+  if (!model) return;
+  const effort = els.reasoningEffort.value;
+  const preference = {
+    model: model.id,
+    modelName: model.name || model.id,
+    effort: modelReasoningEfforts(model).includes(effort) ? effort : null,
+  };
+  const projectId = state.currentProjectId;
+  const conversations = getActiveConversations();
+  const existing = getCurrentConv();
+  const footer = changedPreference(existing ? latestQueryPreference(existing.messages) : null, preference);
 
   // Build content for API
   let apiContent;
@@ -1193,10 +1296,12 @@ async function sendMessage() {
     apiContent = text;
   }
 
+  const turn = { id: generateId('turn'), preference, status: 'pending' };
   const storedMessage = {
     role: 'user',
     content: apiContent,
     displayText: text,
+    turn,
     attachmentMeta: attachments.length > 0
       ? attachments.map((a) => ({
           name: a.name, size: a.size, category: a.category,
@@ -1204,9 +1309,18 @@ async function sendMessage() {
         }))
       : undefined,
   };
-  conv.messages.push(storedMessage);
-  conv.model = state.selectedModel;
-  saveCurrentConversations();
+  const conv = existing || createConversation(text || '(attached files)', storedMessage);
+  if (existing) conv.messages.push(storedMessage);
+  else conversations.unshift(conv);
+  if (!saveConversationHistory(projectId)) {
+    if (existing) conv.messages.pop();
+    else conversations.shift();
+    return;
+  }
+  if (!existing) {
+    state.currentConvId = conv.id;
+    renderSidebarContent();
+  }
 
   appendMessageEl('user', apiContent, storedMessage.attachmentMeta, text);
   els.messageInput.value = '';
@@ -1217,87 +1331,105 @@ async function sendMessage() {
   const apiMessages = buildApiMessages(conv);
 
   // Start streaming
-  state.isStreaming = true;
+  const controller = new AbortController();
+  const request = { controller, turn, text: '' };
+  state.activeRequest = request;
   els.sendBtn.classList.add('hidden');
   els.stopBtn.classList.remove('hidden');
   els.messageInput.disabled = true;
 
-  const assistantDiv = appendMessageEl('assistant', '');
-  assistantDiv.classList.add('streaming');
-  const contentEl = assistantDiv.querySelector('.message-content');
-
-  let fullResponse = '';
+  appendTurnReply(turn, footer);
+  scrollToBottom();
   const startTime = Date.now();
+  let lastCheckpoint = -Infinity;
+  let timeout;
+  let reader;
+  let completed = false;
+  let interruption = 'The reply stream ended early.';
+  const resetTimeout = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort(new DOMException('The reply timed out.', 'TimeoutError')), replyTimeoutMs);
+  };
+  const saveReply = (reportError) => {
+    const owner = projectId ? getProject(projectId)?.conversations : state.conversations;
+    if (owner?.includes(conv)) saveConversationHistory(projectId, reportError);
+  };
 
   try {
-    state.abortController = new AbortController();
+    resetTimeout();
 
-    const payload = { model: state.selectedModel, messages: apiMessages };
-    const effort = els.reasoningEffort.value;
-    if (!els.reasoningEffort.disabled && effort) payload.reasoning = { effort };
+    const payload = { model: preference.model, messages: apiMessages };
+    if (preference.effort !== null) payload.reasoning = { effort: preference.effort };
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...credentialHeaders(credential) },
       body: JSON.stringify(payload),
-      signal: state.abortController.signal,
+      signal: controller.signal,
     });
 
     if (!res.ok) {
       const data = await res.json().catch(() => null);
-      if (rejectInvalidSavedKey(credential, res, data)) throw new Error(savedKeyError);
-      throw new Error(data?.error || `HTTP ${res.status}`);
+      rejectInvalidSavedKey(credential, res, data);
+      throw new Error('The request failed.');
     }
 
-    const reader = res.body.getReader();
+    reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
+    stream: while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      buffer += done ? `${decoder.decode()}\n` : decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') {
+          completed = true;
+          break stream;
+        }
+        let event;
         try {
-          const parsed = JSON.parse(data);
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (typeof delta === 'string' && delta) {
-            fullResponse += delta;
-            renderPlainText(contentEl, fullResponse);
-            scrollToBottom();
+          event = JSON.parse(data);
+        } catch { continue; }
+        if (event?.error || event?.choices?.[0]?.finish_reason === 'error') throw new Error('The reply stream failed.');
+        const delta = event?.choices?.[0]?.delta?.content;
+        if (typeof delta !== 'string' || !delta) continue;
+        request.text += delta;
+        if (delta.trim()) {
+          resetTimeout();
+          const now = Date.now();
+          if (now - lastCheckpoint >= replyCheckpointMs) {
+            turn.content = request.text;
+            saveReply(false);
+            lastCheckpoint = now;
           }
-        } catch { /* skip malformed chunks */ }
+        }
+        if (request.contentEl.isConnected) {
+          renderPlainText(request.contentEl, request.text);
+          scrollToBottom();
+        }
       }
+      if (done) break;
     }
-
-    renderAssistantReply(contentEl, fullResponse);
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const metaDiv = document.createElement('div');
-    metaDiv.className = 'message-meta';
-    metaDiv.textContent = `${elapsed}s`;
-    assistantDiv.querySelector('.message-body').appendChild(metaDiv);
-    scrollToBottom();
-
-    conv.messages.push({ role: 'assistant', content: fullResponse });
-    saveCurrentConversations();
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      if (fullResponse) {
-        renderAssistantReply(contentEl, fullResponse);
-        conv.messages.push({ role: 'assistant', content: fullResponse });
-        saveCurrentConversations();
-      }
-    } else {
-      contentEl.replaceChildren(makeElement('div', 'message-error', `Error: ${err.message}`));
-    }
+  } catch {
+    interruption = controller.signal.reason?.name === 'TimeoutError' ? 'The reply timed out.'
+      : controller.signal.aborted ? 'The reply was stopped.' : 'The request or reply stream failed.';
   } finally {
-    assistantDiv.classList.remove('streaming');
-    state.isStreaming = false;
-    state.abortController = null;
+    clearTimeout(timeout);
+    reader?.cancel().catch(() => {});
+    const hasText = hasReplyText(request.text);
+    turn.status = hasText ? completed ? 'complete' : 'interrupted' : 'missing';
+    if (hasText) turn.content = request.text;
+    if (!completed || !hasText) turn.interruption = completed ? 'The stream returned no reply text.' : interruption;
+    if (hasText) turn.elapsedMs = Date.now() - startTime;
+    state.activeRequest = null;
+    saveReply(true);
+    if (request.replyEl.isConnected) {
+      renderTurnReply(request.replyEl, turn, footer);
+      scrollToBottom();
+    }
     els.sendBtn.classList.remove('hidden');
     els.stopBtn.classList.add('hidden');
     els.messageInput.disabled = !state.credential;
@@ -1306,7 +1438,7 @@ async function sendMessage() {
 }
 
 function stopStreaming() {
-  if (state.abortController) state.abortController.abort();
+  state.activeRequest?.controller.abort();
 }
 
 // ===== Settings =====

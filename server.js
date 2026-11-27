@@ -124,10 +124,18 @@ app.post('/api/chat', requireApiKey, requireJson, express.json({ limit: '50mb', 
     payload.reasoning = { effort: reasoning.effort };
   }
 
+  const controller = new AbortController();
+  let reader;
+  const disconnect = () => {
+    controller.abort();
+    reader?.cancel().catch(() => {});
+  };
+  res.once('close', disconnect);
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       redirect: 'error',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${res.locals.apiKey}`,
@@ -146,26 +154,29 @@ app.post('/api/chat', requireApiKey, requireJson, express.json({ limit: '50mb', 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Connection', 'keep-alive');
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    if (controller.signal.aborted) {
+      await response.body?.cancel();
+      return;
+    }
+    reader = response.body.getReader();
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) {
-        res.write('data: [DONE]\n\n');
-        break;
-      }
-      const chunk = decoder.decode(value, { stream: true });
-      res.write(chunk);
+      if (done) break;
+      // Only OpenRouter can mark a reply complete; an EOF might be a disconnect.
+      res.write(Buffer.from(value));
     }
 
     res.end();
   } catch (err) {
+    if (res.destroyed) return;
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to connect to OpenRouter' });
     } else {
       res.end();
     }
+  } finally {
+    res.removeListener('close', disconnect);
   }
 });
 

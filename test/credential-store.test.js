@@ -67,7 +67,7 @@ test('proxy seals locally and only forwards authorized decrypted credentials to 
   global.fetch = async (url, options) => {
     upstream.push([url, options.headers.Authorization, options.redirect]);
     if (url.endsWith('/models')) return Response.json({ data: [] });
-    return new Response('data: {"choices":[]}\n\n');
+    return new Response('data: {"choices":[]}\n\ndata: [DONE]\n\n');
   };
   t.after(() => { global.fetch = realFetch; });
   const server = app.listen(0, '127.0.0.1');

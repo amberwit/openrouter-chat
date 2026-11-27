@@ -8,10 +8,11 @@ const app = require('../server');
 test('chat proxy validates effort and streams the upstream response', async (t) => {
   const requests = [];
   const event = 'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n';
+  const done = 'data: [DONE]\n\n';
   const realFetch = global.fetch;
   global.fetch = async (url, options) => {
     requests.push({ url, method: options.method, body: JSON.parse(options.body) });
-    return new Response(event, { headers: { 'Content-Type': 'text/event-stream' } });
+    return new Response(requests.length === 1 ? event + done : event, { headers: { 'Content-Type': 'text/event-stream' } });
   };
   t.after(() => { global.fetch = realFetch; });
 
@@ -31,7 +32,7 @@ test('chat proxy validates effort and streams the upstream response', async (t) 
   const response = await send({ ...chat, reasoning: { effort: 'high', max_tokens: 500 } });
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type'), /^text\/event-stream/);
-  assert.equal(await response.text(), `${event}data: [DONE]\n\n`);
+  assert.equal(await response.text(), event + done);
   assert.deepEqual(requests[0], {
     url: 'https://openrouter.ai/api/v1/chat/completions',
     method: 'POST',
@@ -40,7 +41,7 @@ test('chat proxy validates effort and streams the upstream response', async (t) 
 
   const defaultResponse = await send(chat);
   assert.equal(defaultResponse.status, 200);
-  await defaultResponse.text();
+  assert.equal(await defaultResponse.text(), event);
   assert.deepEqual(requests[1].body, { ...chat, stream: true });
 
   for (const reasoning of [null, {}, { effort: 'turbo' }, { effort: ['high'] }]) {

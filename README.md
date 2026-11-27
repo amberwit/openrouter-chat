@@ -16,7 +16,7 @@ A modern, sleek chat interface for communicating with AI models through [OpenRou
 - **File attachments** — Attach images, PDFs, text files, and code to any chat via button, drag-and-drop, or clipboard paste
 - **Markdown rendering** — Full support for headings, code blocks, tables, lists, and blockquotes
 - **Code blocks with copy** — Formatted code with language labels and one-click copy
-- **Conversation history** — Multiple conversations saved locally with sidebar navigation
+- **Conversation history** — Multiple conversations saved locally with sidebar navigation; submitted model and effort choices are restored on reopening
 - **Dark / Light theme** — Toggle between themes in Settings
 - **System prompt** — Configure a custom system prompt for all conversations
 - **Stop generation** — Cancel a response mid-stream
@@ -88,6 +88,8 @@ The local proxy uses your credential to call OpenRouter over HTTPS and streams t
 The encrypted record works on the same installation and browser address after a reload or server restart. A copy of the browser data alone cannot decrypt the key, but a copy of both the record and the server's private file can. Treat the encrypted record as sensitive: a party who can submit it to this running local server can use the key without decrypting it themselves. This feature does not protect against compromised software running as your user. If the private file is lost, enter the API key again to create a new encrypted record. Turning **Remember** off and saving deletes the browser's persistent copy, but the current tab can keep chatting until reload. This does not revoke copies elsewhere or the key at OpenRouter. Consider a spending-limited key; revoke it and review usage if you suspect exposure.
 
 Chats, project files, and preferences are stored in the browser's `localStorage`, not in a server-side database. On each chat request, the conversation, system instructions, and attached context (including eligible project files) are sent through OpenRouter to the model provider. Do not include files or secrets you are unwilling to share with those services. Markdown libraries are served locally and model replies do not load remote images or other embedded media. HTTP(S) links still open their destinations when clicked. Only supported raster attachments are previewed; other types appear as file names.
+
+Model and reasoning changes are recorded when you send a message, before contacting OpenRouter. The first recorded choice and later changes appear in a small footer under the corresponding reply. If a reply is missing, the chat shows **Response missing or not received.** A request times out after two minutes without new reply text. Saved partial text is retained and marked interrupted. Placeholder text and reply metadata are not sent to OpenRouter. Chats without recorded choices leave the current selectors alone.
 
 Chat requests are limited to 50 MiB of uncompressed JSON, including the conversation, attachments, and project context. If a request is too large, reduce the attachments or project files, or start a shorter chat.
 

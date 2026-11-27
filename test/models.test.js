@@ -94,14 +94,53 @@ test('effort options follow the selected model, including when restoring a conve
   run(`
     renderMessages = () => {};
     renderSidebarContent = () => {};
-    state.conversations = [{ id: 'conv-b', model: 'b' }, { id: 'conv-c', model: 'c' }];
+    state.conversations = [
+      { id: 'conv-b', messages: [{ role: 'user', turn: { preference: { model: 'b', effort: 'none' } } }] },
+      { id: 'conv-c', messages: [{ role: 'user', turn: { preference: { model: 'c', effort: 'high' } } }] },
+      { id: 'legacy', model: 'a', messages: [{ role: 'user', content: 'An old query' }] },
+      { id: 'missing-model', messages: [{ role: 'user', turn: { preference: { model: 'missing', effort: null } } }] },
+    ];
     loadConversation('conv-b');
   `);
-  assert.equal(effort.value, '');
+  assert.equal(effort.value, 'none');
   assert.deepEqual(values(), ['', 'max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none']);
 
   run("loadConversation('conv-c')");
   assert.deepEqual(values(), ['']);
   assert.equal(effort.disabled, true);
   assert.equal(control.classList.contains('hidden'), true);
+  run("loadConversation('legacy'); loadConversation('missing-model')");
+  assert.equal(run('state.selectedModel'), 'c');
+});
+
+test('history detects missing replies and shows preference changes only once per submitted pair', () => {
+  const { run } = loadApp();
+  run(`
+    const query = (model, effort, status, content) => ({
+      role: 'user', content: 'Prompt', turn: { preference: { model, effort }, status, content },
+    });
+    const transcript = [
+      { role: 'user', content: 'Old answered prompt' }, { role: 'assistant', content: 'Old reply' },
+      { role: 'user', content: 'Old unanswered prompt' },
+      { role: 'user', content: 'Old empty reply' }, { role: 'assistant', content: '  ' },
+      query('a', 'high', 'complete', 'New reply'),
+      query('a', 'high', 'pending'),
+      query('b', null, 'missing'),
+      query('b', null, 'complete', 'New reply'),
+      query('b', 'none', 'pending', 'Partial reply'),
+      { role: 'user', content: 'Trailing unanswered prompt' },
+    ];
+  `);
+  assert.equal(run(`JSON.stringify(conversationRows(transcript).filter((row) => row.turn).map(({ turn, footer }) =>
+    [turn.status, turn.content || null, footer?.model || null, footer?.effort || null]))`), JSON.stringify([
+    ['missing', null, null, null], ['missing', null, null, null],
+    ['complete', 'New reply', 'a', 'high'], ['pending', null, null, null],
+    ['missing', null, 'b', null], ['complete', 'New reply', null, null],
+    ['pending', 'Partial reply', 'b', 'none'], ['missing', null, null, null],
+  ]));
+  assert.equal(run('latestQueryPreference(transcript).effort'), 'none');
+  const apiMessages = JSON.parse(run('JSON.stringify(buildApiMessages({ messages: transcript }))'));
+  assert.deepEqual(apiMessages.filter((message) => message.role === 'assistant').map((message) => message.content),
+    ['Old reply', 'New reply', 'New reply', 'Partial reply']);
+  assert.ok(apiMessages.every((message) => Object.keys(message).length === 2));
 });
