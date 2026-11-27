@@ -61,8 +61,14 @@
           </svg>
         </button>
         <div id="model-selector-wrapper">
-          <select id="model-selector" disabled>
+          <select id="model-selector" aria-label="Model (prices in USD)" disabled>
             <option value="">Set API key first</option>
+          </select>
+        </div>
+        <div id="reasoning-control" class="hidden">
+          <label for="reasoning-effort">Reasoning effort</label>
+          <select id="reasoning-effort" disabled>
+            <option value="">Model default</option>
           </select>
         </div>
       </header>

@@ -3,6 +3,7 @@ const path = require('path');
 
 const app = express();
 const PORT = 3000;
+const reasoningEfforts = new Set(['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none']);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -28,7 +29,14 @@ app.post('/api/chat', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(400).json({ error: 'API key required' });
 
-  const { model, messages } = req.body;
+  const { model, messages, reasoning } = req.body;
+  const payload = { model, messages, stream: true };
+  if (reasoning !== undefined) {
+    if (!reasoningEfforts.has(reasoning?.effort)) {
+      return res.status(400).json({ error: 'Invalid reasoning effort' });
+    }
+    payload.reasoning = { effort: reasoning.effort };
+  }
 
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -39,11 +47,7 @@ app.post('/api/chat', async (req, res) => {
         'HTTP-Referer': 'http://localhost:3000',
         'X-Title': 'OpenRouter Chat',
       },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: true,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
@@ -79,6 +83,10 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`\n  OpenRouter Chat is running at http://localhost:${PORT}\n`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`\n  OpenRouter Chat is running at http://localhost:${PORT}\n`);
+  });
+}
+
+module.exports = app;

@@ -26,6 +26,8 @@ const els = {
   newChatBtn: $('#new-chat-btn'),
   sidebarContent: $('#sidebar-content'),
   modelSelector: $('#model-selector'),
+  reasoningControl: $('#reasoning-control'),
+  reasoningEffort: $('#reasoning-effort'),
   messagesContainer: $('#messages-container'),
   messages: $('#messages'),
   welcome: $('#welcome'),
@@ -102,7 +104,7 @@ function bindEvents() {
   els.modelSelector.addEventListener('change', (e) => {
     state.selectedModel = e.target.value;
     localStorage.setItem('openrouter_model', state.selectedModel);
-    updateModelLabel();
+    updateModelControls();
   });
 
   // Settings
@@ -231,6 +233,43 @@ function applyTheme(theme) {
 }
 
 // ===== Models =====
+const tokenPriceFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumSignificantDigits: 1,
+  maximumSignificantDigits: 6,
+});
+const reasoningEfforts = ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none'];
+const reasoningEffortLabels = { max: 'Max', xhigh: 'Extra high', high: 'High', medium: 'Medium', low: 'Low', minimal: 'Minimal', none: 'None' };
+
+function parseTokenPrice(value) {
+  return typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+}
+
+function modelOptionLabel(model) {
+  const name = model.name || model.id;
+  const input = parseTokenPrice(model.pricing?.prompt);
+  const output = parseTokenPrice(model.pricing?.completion);
+  if (input === -1 || output === -1) return `${name} — Variable pricing`;
+  if (input === 0 && output === 0) return `${name} — Free text tokens`;
+
+  const format = (price) => {
+    const perMillion = price * 1_000_000;
+    return Number.isFinite(perMillion) && perMillion >= 0 ? tokenPriceFormatter.format(perMillion) : null;
+  };
+  const inputLabel = format(input);
+  const outputLabel = format(output);
+  if (!inputLabel && !outputLabel) return `${name} — Pricing unavailable`;
+  return `${name} — ${inputLabel || '?'} in / ${outputLabel || '?'} out per 1M`;
+}
+
+function createModelOption(model) {
+  const option = document.createElement('option');
+  option.value = model.id;
+  option.textContent = modelOptionLabel(model);
+  return option;
+}
+
 async function fetchModels() {
   try {
     const res = await fetch('/api/models', {
@@ -243,17 +282,18 @@ async function fetchModels() {
       return;
     }
 
+    const preferredModel = state.models.length ? state.selectedModel : getCurrentConv()?.model || state.selectedModel;
     state.models = (data.data || [])
       .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
 
-    populateModelSelector();
+    populateModelSelector(preferredModel);
     enableInput();
   } catch (err) {
     console.error('Failed to fetch models:', err);
   }
 }
 
-function populateModelSelector() {
+function populateModelSelector(preferredModel) {
   const selector = els.modelSelector;
   selector.innerHTML = '';
 
@@ -281,10 +321,7 @@ function populateModelSelector() {
   popular.forEach((id) => {
     const model = state.models.find((m) => m.id === id);
     if (model) {
-      const opt = document.createElement('option');
-      opt.value = model.id;
-      opt.textContent = model.name || model.id;
-      popularGroup.appendChild(opt);
+      popularGroup.appendChild(createModelOption(model));
     }
   });
   if (popularGroup.children.length > 0) {
@@ -295,16 +332,14 @@ function populateModelSelector() {
     const optgroup = document.createElement('optgroup');
     optgroup.label = provider;
     groups[provider].forEach((m) => {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.name || m.id;
-      optgroup.appendChild(opt);
+      optgroup.appendChild(createModelOption(m));
     });
     selector.appendChild(optgroup);
   });
 
-  if (state.selectedModel && state.models.find((m) => m.id === state.selectedModel)) {
-    selector.value = state.selectedModel;
+  if (preferredModel && state.models.some((m) => m.id === preferredModel)) {
+    selector.value = preferredModel;
+    state.selectedModel = preferredModel;
   } else if (state.models.length > 0) {
     const defaultModel = popular.find((id) => state.models.find((m) => m.id === id));
     selector.value = defaultModel || state.models[0].id;
@@ -313,12 +348,25 @@ function populateModelSelector() {
   }
 
   selector.disabled = false;
-  updateModelLabel();
+  updateModelControls();
 }
 
-function updateModelLabel() {
+function updateModelControls() {
   const model = state.models.find((m) => m.id === state.selectedModel);
   els.modelLabel.textContent = model ? (model.name || model.id) : '';
+
+  const capabilities = model?.reasoning;
+  const supported = capabilities?.supported_efforts;
+  const efforts = (supported === null ? reasoningEfforts : Array.isArray(supported) ? supported : [])
+    .filter((effort) => reasoningEfforts.includes(effort) && !(capabilities.mandatory && effort === 'none'));
+  const selector = els.reasoningEffort;
+  const previous = selector.dataset.model === model?.id ? selector.value : '';
+  selector.dataset.model = model?.id || '';
+  selector.replaceChildren(new Option('Model default', ''));
+  efforts.forEach((effort) => selector.appendChild(new Option(reasoningEffortLabels[effort], effort)));
+  selector.value = efforts.includes(previous) ? previous : '';
+  selector.disabled = efforts.length === 0;
+  els.reasoningControl.classList.toggle('hidden', selector.disabled);
 }
 
 // ===== Input =====
@@ -822,7 +870,7 @@ function loadConversation(id) {
   if (conv.model && state.models.find((m) => m.id === conv.model)) {
     els.modelSelector.value = conv.model;
     state.selectedModel = conv.model;
-    updateModelLabel();
+    updateModelControls();
   }
 
   renderMessages(conv.messages);
@@ -1132,10 +1180,13 @@ async function sendMessage() {
   try {
     state.abortController = new AbortController();
 
+    const payload = { model: state.selectedModel, messages: apiMessages };
+    const effort = els.reasoningEffort.value;
+    if (!els.reasoningEffort.disabled && effort) payload.reasoning = { effort };
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Api-Key': state.apiKey },
-      body: JSON.stringify({ model: state.selectedModel, messages: apiMessages }),
+      body: JSON.stringify(payload),
       signal: state.abortController.signal,
     });
 

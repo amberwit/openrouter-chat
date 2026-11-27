@@ -487,7 +487,7 @@ button {
 
 /* ===== Top Bar ===== */
 #top-bar {
-  height: var(--topbar-height);
+  min-height: var(--topbar-height);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -513,11 +513,25 @@ button {
 #model-selector-wrapper {
   position: relative;
   flex: 1;
-  max-width: 400px;
+  min-width: 0;
+  max-width: 560px;
 }
 
 #model-selector {
   width: 100%;
+  text-overflow: ellipsis;
+}
+
+#reasoning-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+#model-selector,
+#reasoning-effort {
   padding: 8px 36px 8px 12px;
   background: var(--bg-tertiary);
   color: var(--text-primary);
@@ -533,16 +547,31 @@ button {
   background-position: right 12px center;
   transition: border-color var(--transition);
 }
-#model-selector:hover:not(:disabled) {
+#model-selector:hover:not(:disabled),
+#reasoning-effort:hover:not(:disabled) {
   border-color: var(--border-light);
 }
-#model-selector:focus {
+#model-selector:focus,
+#reasoning-effort:focus {
   outline: none;
   border-color: var(--accent);
 }
 #model-selector:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+@media (max-width: 600px) {
+  #top-bar {
+    flex-wrap: wrap;
+    column-gap: 8px;
+    row-gap: 4px;
+    padding-block: 8px;
+  }
+
+  #reasoning-control {
+    flex-basis: 100%;
+  }
 }
 
 /* ===== Messages ===== */

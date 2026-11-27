@@ -9,6 +9,8 @@ A modern, sleek chat interface for communicating with AI models through [OpenRou
 ## Features
 
 - **Multi-model support** — Access hundreds of AI models (Claude, GPT-4o, Gemini, Llama, DeepSeek, and more) through a single interface
+- **Model pricing** — Compare OpenRouter's catalog rates for input and output text, in USD per million tokens. These are not per-request estimates and don't include separately priced features.
+- **Reasoning effort** — Set effort for models that expose it, or leave it on **Model default**. Reasoning can add to output cost even though the chat only displays the answer.
 - **Streaming responses** — Real-time token-by-token output with a live cursor
 - **Projects** — Create project spaces with shared files and custom instructions (like Claude Projects / Grok Projects / Perplexity Spaces). All project context is automatically available to every chat within the project
 - **File attachments** — Attach images, PDFs, text files, and code to any chat via button, drag-and-drop, or clipboard paste
@@ -80,6 +82,10 @@ openrouter-chat/
 ## How It Works
 
 The Express server acts as a lightweight proxy between the browser and the OpenRouter API. This keeps your API key out of browser network logs and handles Server-Sent Events (SSE) streaming. All conversation data is stored in the browser's `localStorage` — nothing is sent to any server other than OpenRouter.
+
+## Tests
+
+Run `npm test` to check model labels, reasoning controls, and the streaming proxy with a mocked OpenRouter response. No API key is required.
 
 ## License
 
