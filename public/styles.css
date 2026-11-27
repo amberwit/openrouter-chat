@@ -63,7 +63,7 @@ html, body {
 }
 
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: var(--bg-primary);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
@@ -681,6 +681,10 @@ button {
   font-size: 15px;
   line-height: 1.7;
 }
+.message-content.plain-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .message-content p {
   margin-bottom: 12px;
 }
@@ -1055,11 +1059,6 @@ button {
   max-height: 200px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  cursor: pointer;
-  transition: opacity var(--transition);
-}
-.message-attachments img:hover {
-  opacity: 0.85;
 }
 .message-attachment-file {
   display: inline-flex;

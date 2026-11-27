@@ -32,7 +32,7 @@ function loadApp() {
       },
       createElement,
     },
-    localStorage: { getItem: () => null, setItem: () => {} },
+    localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
     window: {},
     Option: function (textContent, value) { Object.assign(this, { textContent, value }); },
   });

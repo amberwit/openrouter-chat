@@ -1,6 +1,8 @@
 // ===== State =====
+// Older builds stored the key on this browser origin. Leave all other storage intact.
+localStorage.removeItem('openrouter_api_key');
 const state = {
-  apiKey: localStorage.getItem('openrouter_api_key') || '',
+  apiKey: '',
   systemPrompt: localStorage.getItem('openrouter_system_prompt') || '',
   theme: localStorage.getItem('openrouter_theme') || 'dark',
   selectedModel: localStorage.getItem('openrouter_model') || '',
@@ -64,12 +66,7 @@ const els = {
 // ===== Initialization =====
 function init() {
   applyTheme(state.theme);
-  els.apiKeyInput.value = state.apiKey;
   els.systemPromptInput.value = state.systemPrompt;
-
-  if (state.apiKey) {
-    fetchModels();
-  }
 
   bindEvents();
   renderProjectSelector();
@@ -271,11 +268,13 @@ function createModelOption(model) {
 }
 
 async function fetchModels() {
+  const apiKey = state.apiKey;
   try {
     const res = await fetch('/api/models', {
-      headers: { 'X-Api-Key': state.apiKey },
+      headers: { 'X-Api-Key': apiKey },
     });
     const data = await res.json();
+    if (state.apiKey !== apiKey) return;
 
     if (data.error) {
       console.error('Error fetching models:', data.error);
@@ -388,10 +387,31 @@ function generateId(prefix) {
   return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+function makeElement(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+function fileIcon(name) {
+  return makeElement('div', 'file-icon', name.split('.').pop().toUpperCase().slice(0, 4));
+}
+
+function fileNameEl(tag, name) {
+  const el = makeElement(tag, 'file-name', name);
+  el.title = name;
+  return el;
+}
+
+function attachmentImage(att) {
+  if (att.category !== 'image' || typeof att.dataUrl !== 'string' ||
+      !/^data:image\/(?:png|jpe?g|gif|webp|bmp|x-icon|vnd\.microsoft\.icon|avif);base64,/i.test(att.dataUrl)) return null;
+  const img = document.createElement('img');
+  img.alt = att.name;
+  img.title = att.name;
+  img.src = att.dataUrl;
+  return img;
 }
 
 function formatFileSize(bytes) {
@@ -471,13 +491,9 @@ async function processFile(file) {
     category,
     dataUrl: null,
     textContent: null,
-    preview: null,
   };
 
-  if (category === 'image') {
-    attachment.dataUrl = await readFileAsDataUrl(file);
-    attachment.preview = URL.createObjectURL(file);
-  } else if (category === 'text') {
+  if (category === 'text') {
     attachment.textContent = await readFileAsText(file);
   } else {
     attachment.dataUrl = await readFileAsDataUrl(file);
@@ -505,17 +521,12 @@ async function addAttachments(files) {
 function removeAttachment(id) {
   const idx = state.pendingAttachments.findIndex((a) => a.id === id);
   if (idx !== -1) {
-    const att = state.pendingAttachments[idx];
-    if (att.preview) URL.revokeObjectURL(att.preview);
     state.pendingAttachments.splice(idx, 1);
   }
   renderAttachmentPreviews();
 }
 
 function clearAttachments() {
-  state.pendingAttachments.forEach((a) => {
-    if (a.preview) URL.revokeObjectURL(a.preview);
-  });
   state.pendingAttachments = [];
   renderAttachmentPreviews();
 }
@@ -531,25 +542,19 @@ function renderAttachmentPreviews() {
 
   container.classList.remove('hidden');
   state.pendingAttachments.forEach((att) => {
-    const div = document.createElement('div');
-    div.className = `attachment-preview ${att.category === 'image' ? 'image-preview' : 'file-preview'}`;
-    if (att.category === 'image') {
-      div.innerHTML = `
-        <img src="${att.preview || att.dataUrl}" alt="${escapeHtml(att.name)}">
-        <button class="remove-attachment" title="Remove">&times;</button>
-      `;
+    const img = attachmentImage(att);
+    const div = makeElement('div', img ? 'attachment-preview image-preview' : 'attachment-preview file-preview');
+    if (img) {
+      div.appendChild(img);
     } else {
-      const ext = att.name.split('.').pop().toUpperCase().slice(0, 4);
-      div.innerHTML = `
-        <div class="file-icon">${ext}</div>
-        <div class="file-info">
-          <div class="file-name" title="${escapeHtml(att.name)}">${escapeHtml(att.name)}</div>
-          <div class="file-size">${formatFileSize(att.size)}</div>
-        </div>
-        <button class="remove-attachment" title="Remove">&times;</button>
-      `;
+      const info = makeElement('div', 'file-info');
+      info.append(fileNameEl('div', att.name), makeElement('div', 'file-size', formatFileSize(att.size)));
+      div.append(fileIcon(att.name), info);
     }
-    div.querySelector('.remove-attachment').addEventListener('click', () => removeAttachment(att.id));
+    const remove = makeElement('button', 'remove-attachment', '×');
+    remove.title = 'Remove';
+    remove.addEventListener('click', () => removeAttachment(att.id));
+    div.appendChild(remove);
     container.appendChild(div);
   });
 }
@@ -646,21 +651,16 @@ function renderProjectFileList() {
   const container = els.projectFileList;
   container.innerHTML = '';
   state.pendingProjectFiles.forEach((file, index) => {
-    const entry = document.createElement('div');
-    entry.className = 'project-file-entry';
-    const ext = file.name.split('.').pop().toUpperCase().slice(0, 4);
-    entry.innerHTML = `
-      <div class="file-info">
-        <div class="file-icon">${ext}</div>
-        <span class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
-        <span class="file-size">${formatFileSize(file.size)}</span>
-      </div>
-      <button class="remove-file-btn" title="Remove">&times;</button>
-    `;
-    entry.querySelector('.remove-file-btn').addEventListener('click', () => {
+    const entry = makeElement('div', 'project-file-entry');
+    const info = makeElement('div', 'file-info');
+    info.append(fileIcon(file.name), fileNameEl('span', file.name), makeElement('span', 'file-size', formatFileSize(file.size)));
+    const remove = makeElement('button', 'remove-file-btn', '×');
+    remove.title = 'Remove';
+    remove.addEventListener('click', () => {
       state.pendingProjectFiles.splice(index, 1);
       renderProjectFileList();
     });
+    entry.append(info, remove);
     container.appendChild(entry);
   });
 }
@@ -757,7 +757,7 @@ function renderSidebarContent() {
   header.className = 'project-header';
   header.innerHTML = `
     <div class="project-header-top">
-      <h3 title="${escapeHtml(project.name)}">${escapeHtml(project.name)}</h3>
+      <h3></h3>
       <div class="project-header-actions">
         <button class="edit-project-btn" title="Edit project">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -766,8 +766,11 @@ function renderSidebarContent() {
         </button>
       </div>
     </div>
-    ${project.description ? `<div class="project-description">${escapeHtml(project.description)}</div>` : ''}
   `;
+  const name = header.querySelector('h3');
+  name.textContent = project.name;
+  name.title = project.name;
+  if (project.description) header.appendChild(makeElement('div', 'project-description', project.description));
   header.querySelector('.edit-project-btn').addEventListener('click', () => openEditProjectModal(project.id));
   container.appendChild(header);
 
@@ -775,12 +778,11 @@ function renderSidebarContent() {
   if (project.files.length > 0) {
     const filesSection = document.createElement('div');
     filesSection.className = 'project-files-section';
-    filesSection.innerHTML = `<div class="section-label">Files (${project.files.length})</div>`;
+    filesSection.appendChild(makeElement('div', 'section-label', `Files (${project.files.length})`));
     project.files.forEach((file) => {
       const fileItem = document.createElement('div');
       fileItem.className = 'project-file-item';
-      const ext = file.name.split('.').pop().toUpperCase().slice(0, 4);
-      fileItem.innerHTML = `<div class="file-icon">${ext}</div><span>${escapeHtml(file.name)}</span>`;
+      fileItem.append(fileIcon(file.name), makeElement('span', '', file.name));
       filesSection.appendChild(fileItem);
     });
     container.appendChild(filesSection);
@@ -809,13 +811,14 @@ function renderConversationListInto(container, conversations) {
     const div = document.createElement('div');
     div.className = `conv-item${conv.id === state.currentConvId ? ' active' : ''}`;
     div.innerHTML = `
-      <span class="conv-title">${escapeHtml(conv.title)}</span>
+      <span class="conv-title"></span>
       <button class="conv-delete" title="Delete">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
         </svg>
       </button>
     `;
+    div.querySelector('.conv-title').textContent = conv.title;
     div.addEventListener('click', () => loadConversation(conv.id));
     div.querySelector('.conv-delete').addEventListener('click', (e) => deleteConversation(conv.id, e));
     container.appendChild(div);
@@ -939,47 +942,33 @@ function renderMessages(messages) {
 function appendMessageEl(role, content, attachmentMeta, displayText) {
   if (els.welcome) els.welcome.classList.add('hidden');
 
-  const div = document.createElement('div');
-  div.className = `message ${role}`;
-  const avatarLabel = role === 'user' ? 'U' : 'AI';
-
-  div.innerHTML = `
-    <div class="message-avatar">${avatarLabel}</div>
-    <div class="message-body">
-      <div class="message-attachments"></div>
-      <div class="message-content"></div>
-    </div>
-  `;
-
-  const attachmentsEl = div.querySelector('.message-attachments');
-  const contentEl = div.querySelector('.message-content');
+  const assistant = role === 'assistant';
+  const div = makeElement('div', assistant ? 'message assistant' : 'message user');
+  const avatar = makeElement('div', 'message-avatar', assistant ? 'AI' : 'U');
+  const body = makeElement('div', 'message-body');
+  const attachmentsEl = makeElement('div', 'message-attachments');
+  const contentEl = makeElement('div', 'message-content');
+  body.append(attachmentsEl, contentEl);
+  div.append(avatar, body);
 
   if (attachmentMeta && attachmentMeta.length > 0) {
     attachmentMeta.forEach((att) => {
-      if (att.category === 'image' && att.dataUrl) {
-        const img = document.createElement('img');
-        img.src = att.dataUrl;
-        img.alt = att.name;
-        img.title = att.name;
-        img.addEventListener('click', () => window.open(att.dataUrl, '_blank'));
+      const img = attachmentImage(att);
+      if (img) {
         attachmentsEl.appendChild(img);
       } else {
-        const fileEl = document.createElement('div');
-        fileEl.className = 'message-attachment-file';
-        const ext = att.name.split('.').pop().toUpperCase().slice(0, 4);
-        fileEl.innerHTML = `<div class="file-icon">${ext}</div><span>${escapeHtml(att.name)}</span>`;
+        const fileEl = makeElement('div', 'message-attachment-file');
+        fileEl.append(fileIcon(att.name), makeElement('span', '', att.name));
         attachmentsEl.appendChild(fileEl);
       }
     });
   }
 
-  if (role === 'assistant') {
-    const textContent = extractTextFromContent(content);
-    contentEl.innerHTML = renderMarkdown(textContent || '');
-    addCopyButtons(contentEl);
+  if (assistant) {
+    renderAssistantReply(contentEl, extractTextFromContent(content));
   } else {
     const userText = displayText !== undefined ? displayText : extractTextFromContent(content);
-    if (userText) contentEl.textContent = userText;
+    renderPlainText(contentEl, userText);
   }
 
   els.messages.appendChild(div);
@@ -995,13 +984,42 @@ function extractTextFromContent(content) {
   return '';
 }
 
-function renderMarkdown(text) {
-  if (!text) return '';
+function renderPlainText(container, text) {
+  container.classList.add('plain-text');
+  container.textContent = text;
+}
+
+function renderAssistantReply(container, text) {
+  if (!text) return;
   try {
-    const html = marked.parse(text, { breaks: true, gfm: true });
-    return DOMPurify.sanitize(html);
+    const markdown = new marked.Marked({
+      breaks: true,
+      gfm: true,
+      renderer: {
+        // Drop raw HTML and remote media before DOMPurify builds a fragment.
+        html: () => '',
+        image: () => '',
+      },
+    });
+    if (!DOMPurify.isSupported) throw new Error('Markdown sanitizer is unavailable');
+    const fragment = DOMPurify.sanitize(markdown.parse(text), {
+      ALLOWED_TAGS: ['a', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'hr', 'li', 'ol', 'p', 'pre', 'strong', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul'],
+      ALLOWED_ATTR: ['align', 'class', 'href', 'start', 'title'],
+      ALLOWED_URI_REGEXP: /^https?:\/\//i,
+      ALLOW_ARIA_ATTR: false,
+      ALLOW_DATA_ATTR: false,
+      RETURN_DOM_FRAGMENT: true,
+    });
+    fragment.querySelectorAll('a[href]').forEach((link) => {
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+    });
+    addCopyButtons(fragment);
+    container.classList.remove('plain-text');
+    container.replaceChildren(fragment);
   } catch {
-    return escapeHtml(text);
+    renderPlainText(container, text);
   }
 }
 
@@ -1011,36 +1029,31 @@ function addCopyButtons(container) {
     if (!code) return;
     const langClass = [...code.classList].find((c) => c.startsWith('language-'));
     const lang = langClass ? langClass.replace('language-', '') : 'code';
-    const header = document.createElement('div');
-    header.className = 'code-header';
-    header.innerHTML = `
-      <span>${lang}</span>
-      <button class="copy-btn" onclick="copyCode(this)">
+    const header = makeElement('div', 'code-header');
+    const btn = makeElement('button', 'copy-btn');
+    btn.type = 'button';
+    btn.innerHTML = `
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
         </svg>
-        Copy
-      </button>
     `;
+    const label = makeElement('span', '', 'Copy');
+    btn.appendChild(label);
+    let resetLabel;
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(code.textContent);
+        label.textContent = 'Copied!';
+      } catch {
+        label.textContent = 'Copy failed';
+      }
+      clearTimeout(resetLabel);
+      resetLabel = setTimeout(() => { label.textContent = 'Copy'; }, 1500);
+    });
+    header.append(makeElement('span', '', lang), btn);
     pre.insertBefore(header, pre.firstChild);
   });
 }
-
-window.copyCode = function (btn) {
-  const pre = btn.closest('pre');
-  const code = pre.querySelector('code');
-  navigator.clipboard.writeText(code.textContent).then(() => {
-    btn.textContent = 'Copied!';
-    setTimeout(() => {
-      btn.innerHTML = `
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-        Copy
-      `;
-    }, 1500);
-  });
-};
 
 function scrollToBottom() {
   els.messagesContainer.scrollTop = els.messagesContainer.scrollHeight;
@@ -1212,32 +1225,34 @@ async function sendMessage() {
         try {
           const parsed = JSON.parse(data);
           const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
+          if (typeof delta === 'string' && delta) {
             fullResponse += delta;
-            contentEl.innerHTML = renderMarkdown(fullResponse);
+            renderPlainText(contentEl, fullResponse);
             scrollToBottom();
           }
         } catch { /* skip malformed chunks */ }
       }
     }
 
-    addCopyButtons(contentEl);
+    renderAssistantReply(contentEl, fullResponse);
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const metaDiv = document.createElement('div');
     metaDiv.className = 'message-meta';
     metaDiv.textContent = `${elapsed}s`;
     assistantDiv.querySelector('.message-body').appendChild(metaDiv);
+    scrollToBottom();
 
     conv.messages.push({ role: 'assistant', content: fullResponse });
     saveCurrentConversations();
   } catch (err) {
     if (err.name === 'AbortError') {
       if (fullResponse) {
+        renderAssistantReply(contentEl, fullResponse);
         conv.messages.push({ role: 'assistant', content: fullResponse });
         saveCurrentConversations();
       }
     } else {
-      contentEl.innerHTML = `<div class="message-error">Error: ${escapeHtml(err.message)}</div>`;
+      contentEl.replaceChildren(makeElement('div', 'message-error', `Error: ${err.message}`));
     }
   } finally {
     assistantDiv.classList.remove('streaming');
@@ -1257,21 +1272,22 @@ function stopStreaming() {
 // ===== Settings =====
 function openSettings() {
   els.settingsModal.classList.remove('hidden');
-  els.apiKeyInput.value = state.apiKey;
+  els.apiKeyInput.placeholder = state.apiKey ? 'Key set for this tab; leave blank to keep it' : 'sk-or-v1-...';
   els.systemPromptInput.value = state.systemPrompt;
   els.apiKeyInput.focus();
 }
 
 function closeSettings() {
+  els.apiKeyInput.value = '';
+  els.apiKeyInput.type = 'password';
   els.settingsModal.classList.add('hidden');
 }
 
 function saveSettings() {
-  const newKey = els.apiKeyInput.value.trim();
+  const newKey = els.apiKeyInput.value.trim() || state.apiKey;
   const keyChanged = newKey !== state.apiKey;
   state.apiKey = newKey;
   state.systemPrompt = els.systemPromptInput.value.trim();
-  localStorage.setItem('openrouter_api_key', state.apiKey);
   localStorage.setItem('openrouter_system_prompt', state.systemPrompt);
   applyTheme(state.theme);
   if (keyChanged && state.apiKey) fetchModels();

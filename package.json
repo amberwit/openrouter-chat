@@ -3,12 +3,17 @@
   "version": "1.0.0",
   "description": "Modern AI chat interface powered by OpenRouter",
   "main": "server.js",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
     "test": "node --test"
   },
   "dependencies": {
-    "express": "^4.21.0"
+    "dompurify": "3.5.0",
+    "express": "4.22.3",
+    "marked": "18.3.0"
   }
 }

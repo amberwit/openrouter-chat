@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenRouter Chat</title>
   <link rel="stylesheet" href="styles.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
   <div id="app">
@@ -148,6 +145,7 @@
           <div class="setting-group">
             <label for="api-key-input">OpenRouter API Key</label>
             <p class="setting-desc">Get your key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a></p>
+            <p class="setting-desc">The key is kept in this tab until you reload or close it.</p>
             <div class="api-key-field">
               <input type="password" id="api-key-input" placeholder="sk-or-v1-..." autocomplete="off">
               <button id="toggle-key-visibility" title="Show/hide key">
@@ -224,8 +222,8 @@
   </div>
 
   <!-- Markdown rendering -->
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+  <script src="/vendor/marked.js"></script>
+  <script src="/vendor/purify.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
