@@ -1,14 +1,23 @@
 // ===== State =====
+// Older builds stored the key on this browser origin. Leave all other storage intact.
+localStorage.removeItem('openrouter_api_key');
+const savedKeyStorage = 'openrouter_saved_api_key_v1';
+const initialSavedKey = localStorage.getItem(savedKeyStorage);
+const savedKeyError = 'Saved key can’t be used. Re-enter your OpenRouter key or turn off remembering to forget it.';
 const state = {
-  apiKey: localStorage.getItem('openrouter_api_key') || '',
+  savedKey: initialSavedKey,
+  credential: initialSavedKey !== null ? { header: 'X-Saved-Key', value: initialSavedKey } : null,
+  keyNotice: '',
+  savingSettings: false,
+  draftTheme: null,
   systemPrompt: localStorage.getItem('openrouter_system_prompt') || '',
   theme: localStorage.getItem('openrouter_theme') || 'dark',
   selectedModel: localStorage.getItem('openrouter_model') || '',
   conversations: JSON.parse(localStorage.getItem('openrouter_conversations') || '[]'),
   currentConvId: null,
+  pendingPreferenceRestore: false,
   models: [],
-  isStreaming: false,
-  abortController: null,
+  activeRequest: null,
   pendingAttachments: [],
   projects: JSON.parse(localStorage.getItem('openrouter_projects') || '[]'),
   currentProjectId: null,
@@ -26,6 +35,8 @@ const els = {
   newChatBtn: $('#new-chat-btn'),
   sidebarContent: $('#sidebar-content'),
   modelSelector: $('#model-selector'),
+  reasoningControl: $('#reasoning-control'),
+  reasoningEffort: $('#reasoning-effort'),
   messagesContainer: $('#messages-container'),
   messages: $('#messages'),
   welcome: $('#welcome'),
@@ -38,6 +49,9 @@ const els = {
   settingsModal: $('#settings-modal'),
   closeSettings: $('#close-settings'),
   apiKeyInput: $('#api-key-input'),
+  rememberKey: $('#remember-api-key'),
+  rememberKeyDesc: $('#remember-api-key-desc'),
+  apiKeyStatus: $('#api-key-status'),
   toggleKeyVis: $('#toggle-key-visibility'),
   systemPromptInput: $('#system-prompt-input'),
   saveSettings: $('#save-settings'),
@@ -62,12 +76,7 @@ const els = {
 // ===== Initialization =====
 function init() {
   applyTheme(state.theme);
-  els.apiKeyInput.value = state.apiKey;
   els.systemPromptInput.value = state.systemPrompt;
-
-  if (state.apiKey) {
-    fetchModels();
-  }
 
   bindEvents();
   renderProjectSelector();
@@ -77,6 +86,7 @@ function init() {
   if (convs.length > 0) {
     loadConversation(convs[0].id);
   }
+  if (state.credential) fetchModels();
 }
 
 // ===== Event Bindings =====
@@ -100,16 +110,20 @@ function bindEvents() {
 
   // Model selector
   els.modelSelector.addEventListener('change', (e) => {
+    const effort = els.reasoningEffort.value;
+    state.pendingPreferenceRestore = false;
     state.selectedModel = e.target.value;
     localStorage.setItem('openrouter_model', state.selectedModel);
-    updateModelLabel();
+    updateModelControls(effort);
   });
+  els.reasoningEffort.addEventListener('change', () => { state.pendingPreferenceRestore = false; });
 
   // Settings
   els.settingsBtn.addEventListener('click', openSettings);
   els.closeSettings.addEventListener('click', closeSettings);
   els.settingsModal.querySelector('.modal-backdrop').addEventListener('click', closeSettings);
   els.saveSettings.addEventListener('click', saveSettings);
+  els.rememberKey.addEventListener('change', updateRememberKeyDescription);
 
   // API key visibility toggle
   els.toggleKeyVis.addEventListener('click', () => {
@@ -122,7 +136,7 @@ function bindEvents() {
     btn.addEventListener('click', () => {
       $$('.theme-btn').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      state.theme = btn.dataset.theme;
+      state.draftTheme = btn.dataset.theme;
     });
   });
 
@@ -231,29 +245,95 @@ function applyTheme(theme) {
 }
 
 // ===== Models =====
+const tokenPriceFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumSignificantDigits: 1,
+  maximumSignificantDigits: 6,
+});
+const reasoningEfforts = ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none'];
+const reasoningEffortLabels = { max: 'Max', xhigh: 'Extra high', high: 'High', medium: 'Medium', low: 'Low', minimal: 'Minimal', none: 'None' };
+
+function parseTokenPrice(value) {
+  return typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+}
+
+function modelOptionLabel(model) {
+  const name = model.name || model.id;
+  const input = parseTokenPrice(model.pricing?.prompt);
+  const output = parseTokenPrice(model.pricing?.completion);
+  if (input === -1 || output === -1) return `${name} — Variable pricing`;
+  if (input === 0 && output === 0) return `${name} — Free text tokens`;
+
+  const format = (price) => {
+    const perMillion = price * 1_000_000;
+    return Number.isFinite(perMillion) && perMillion >= 0 ? tokenPriceFormatter.format(perMillion) : null;
+  };
+  const inputLabel = format(input);
+  const outputLabel = format(output);
+  if (!inputLabel && !outputLabel) return `${name} — Pricing unavailable`;
+  return `${name} — ${inputLabel || '?'} in / ${outputLabel || '?'} out per 1M`;
+}
+
+function createModelOption(model) {
+  const option = document.createElement('option');
+  option.value = model.id;
+  option.textContent = modelOptionLabel(model);
+  return option;
+}
+
 async function fetchModels() {
+  const credential = state.credential;
+  if (!credential) return;
   try {
     const res = await fetch('/api/models', {
-      headers: { 'X-Api-Key': state.apiKey },
+      headers: credentialHeaders(credential),
     });
     const data = await res.json();
+    if (state.credential !== credential) return;
 
-    if (data.error) {
-      console.error('Error fetching models:', data.error);
+    if (rejectInvalidSavedKey(credential, res, data)) return;
+    if (!res.ok || !Array.isArray(data.data)) {
+      showKeyNotice('Could not load models. Check your key or try again in Settings.');
       return;
     }
+    showKeyNotice('');
 
-    state.models = (data.data || [])
+    state.models = data.data
       .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
 
-    populateModelSelector();
+    populateModelSelector(state.selectedModel);
+    if (state.pendingPreferenceRestore && state.models.length) restoreConversationPreference(getCurrentConv());
     enableInput();
-  } catch (err) {
-    console.error('Failed to fetch models:', err);
+  } catch {
+    if (state.credential === credential) showKeyNotice('Could not load models. Try again in Settings.');
   }
 }
 
-function populateModelSelector() {
+function credentialHeaders(credential) {
+  return { [credential.header]: credential.value };
+}
+
+function showKeyNotice(message) {
+  state.keyNotice = message;
+  els.modelLabel.textContent = message || (state.models.find((m) => m.id === state.selectedModel)?.name || state.selectedModel);
+  if (!els.settingsModal.classList.contains('hidden')) els.apiKeyStatus.textContent = message;
+}
+
+function rejectInvalidSavedKey(credential, response, data) {
+  if (credential.header !== 'X-Saved-Key' || response.status !== 401 || data?.code !== 'SAVED_KEY_INVALID') return false;
+  if (state.credential === credential) {
+    state.credential = null;
+    els.modelSelector.disabled = true;
+    els.messageInput.disabled = true;
+    els.sendBtn.disabled = true;
+    els.attachBtn.disabled = true;
+    showKeyNotice(savedKeyError);
+  }
+  return true;
+}
+
+function populateModelSelector(preferredModel) {
   const selector = els.modelSelector;
   selector.innerHTML = '';
 
@@ -281,10 +361,7 @@ function populateModelSelector() {
   popular.forEach((id) => {
     const model = state.models.find((m) => m.id === id);
     if (model) {
-      const opt = document.createElement('option');
-      opt.value = model.id;
-      opt.textContent = model.name || model.id;
-      popularGroup.appendChild(opt);
+      popularGroup.appendChild(createModelOption(model));
     }
   });
   if (popularGroup.children.length > 0) {
@@ -295,16 +372,14 @@ function populateModelSelector() {
     const optgroup = document.createElement('optgroup');
     optgroup.label = provider;
     groups[provider].forEach((m) => {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.name || m.id;
-      optgroup.appendChild(opt);
+      optgroup.appendChild(createModelOption(m));
     });
     selector.appendChild(optgroup);
   });
 
-  if (state.selectedModel && state.models.find((m) => m.id === state.selectedModel)) {
-    selector.value = state.selectedModel;
+  if (preferredModel && state.models.some((m) => m.id === preferredModel)) {
+    selector.value = preferredModel;
+    state.selectedModel = preferredModel;
   } else if (state.models.length > 0) {
     const defaultModel = popular.find((id) => state.models.find((m) => m.id === id));
     selector.value = defaultModel || state.models[0].id;
@@ -313,17 +388,33 @@ function populateModelSelector() {
   }
 
   selector.disabled = false;
-  updateModelLabel();
+  updateModelControls();
 }
 
-function updateModelLabel() {
+function modelReasoningEfforts(model) {
+  const capabilities = model?.reasoning;
+  const supported = capabilities?.supported_efforts;
+  return (supported === null ? reasoningEfforts : Array.isArray(supported) ? supported : [])
+    .filter((effort) => reasoningEfforts.includes(effort) && !(capabilities.mandatory && effort === 'none'));
+}
+
+function updateModelControls(preferredEffort) {
   const model = state.models.find((m) => m.id === state.selectedModel);
   els.modelLabel.textContent = model ? (model.name || model.id) : '';
+  const efforts = modelReasoningEfforts(model);
+  const selector = els.reasoningEffort;
+  const previous = preferredEffort !== undefined ? preferredEffort : selector.dataset.model === model?.id ? selector.value : '';
+  selector.dataset.model = model?.id || '';
+  selector.replaceChildren(new Option('Model default', ''));
+  efforts.forEach((effort) => selector.appendChild(new Option(reasoningEffortLabels[effort], effort)));
+  selector.value = efforts.includes(previous) ? previous : '';
+  selector.disabled = efforts.length === 0;
+  els.reasoningControl.classList.toggle('hidden', selector.disabled);
 }
 
 // ===== Input =====
 function enableInput() {
-  els.messageInput.disabled = false;
+  els.messageInput.disabled = Boolean(state.activeRequest);
   els.sendBtn.disabled = false;
   els.attachBtn.disabled = false;
   els.messageInput.placeholder = 'Send a message...';
@@ -340,10 +431,31 @@ function generateId(prefix) {
   return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+function makeElement(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+function fileIcon(name) {
+  return makeElement('div', 'file-icon', name.split('.').pop().toUpperCase().slice(0, 4));
+}
+
+function fileNameEl(tag, name) {
+  const el = makeElement(tag, 'file-name', name);
+  el.title = name;
+  return el;
+}
+
+function attachmentImage(att) {
+  if (att.category !== 'image' || typeof att.dataUrl !== 'string' ||
+      !/^data:image\/(?:png|jpe?g|gif|webp|bmp|x-icon|vnd\.microsoft\.icon|avif);base64,/i.test(att.dataUrl)) return null;
+  const img = document.createElement('img');
+  img.alt = att.name;
+  img.title = att.name;
+  img.src = att.dataUrl;
+  return img;
 }
 
 function formatFileSize(bytes) {
@@ -368,12 +480,8 @@ function getCurrentProject() {
   return state.currentProjectId ? getProject(state.currentProjectId) : null;
 }
 
-function saveCurrentConversations() {
-  if (state.currentProjectId) {
-    saveProjects();
-  } else {
-    saveConversations();
-  }
+function saveConversationHistory(projectId, reportError = true) {
+  return projectId ? saveProjects(reportError) : saveConversations(reportError);
 }
 
 // ===== File Attachments =====
@@ -423,13 +531,9 @@ async function processFile(file) {
     category,
     dataUrl: null,
     textContent: null,
-    preview: null,
   };
 
-  if (category === 'image') {
-    attachment.dataUrl = await readFileAsDataUrl(file);
-    attachment.preview = URL.createObjectURL(file);
-  } else if (category === 'text') {
+  if (category === 'text') {
     attachment.textContent = await readFileAsText(file);
   } else {
     attachment.dataUrl = await readFileAsDataUrl(file);
@@ -457,17 +561,12 @@ async function addAttachments(files) {
 function removeAttachment(id) {
   const idx = state.pendingAttachments.findIndex((a) => a.id === id);
   if (idx !== -1) {
-    const att = state.pendingAttachments[idx];
-    if (att.preview) URL.revokeObjectURL(att.preview);
     state.pendingAttachments.splice(idx, 1);
   }
   renderAttachmentPreviews();
 }
 
 function clearAttachments() {
-  state.pendingAttachments.forEach((a) => {
-    if (a.preview) URL.revokeObjectURL(a.preview);
-  });
   state.pendingAttachments = [];
   renderAttachmentPreviews();
 }
@@ -483,25 +582,19 @@ function renderAttachmentPreviews() {
 
   container.classList.remove('hidden');
   state.pendingAttachments.forEach((att) => {
-    const div = document.createElement('div');
-    div.className = `attachment-preview ${att.category === 'image' ? 'image-preview' : 'file-preview'}`;
-    if (att.category === 'image') {
-      div.innerHTML = `
-        <img src="${att.preview || att.dataUrl}" alt="${escapeHtml(att.name)}">
-        <button class="remove-attachment" title="Remove">&times;</button>
-      `;
+    const img = attachmentImage(att);
+    const div = makeElement('div', img ? 'attachment-preview image-preview' : 'attachment-preview file-preview');
+    if (img) {
+      div.appendChild(img);
     } else {
-      const ext = att.name.split('.').pop().toUpperCase().slice(0, 4);
-      div.innerHTML = `
-        <div class="file-icon">${ext}</div>
-        <div class="file-info">
-          <div class="file-name" title="${escapeHtml(att.name)}">${escapeHtml(att.name)}</div>
-          <div class="file-size">${formatFileSize(att.size)}</div>
-        </div>
-        <button class="remove-attachment" title="Remove">&times;</button>
-      `;
+      const info = makeElement('div', 'file-info');
+      info.append(fileNameEl('div', att.name), makeElement('div', 'file-size', formatFileSize(att.size)));
+      div.append(fileIcon(att.name), info);
     }
-    div.querySelector('.remove-attachment').addEventListener('click', () => removeAttachment(att.id));
+    const remove = makeElement('button', 'remove-attachment', '×');
+    remove.title = 'Remove';
+    remove.addEventListener('click', () => removeAttachment(att.id));
+    div.appendChild(remove);
     container.appendChild(div);
   });
 }
@@ -521,7 +614,7 @@ function renderProjectSelector() {
   }
 }
 
-function saveProjects() {
+function saveProjects(reportError = true) {
   state.projects.forEach((project) => {
     project.conversations.forEach((conv) => {
       conv.messages.forEach((msg, idx) => {
@@ -533,8 +626,10 @@ function saveProjects() {
   });
   try {
     localStorage.setItem('openrouter_projects', JSON.stringify(state.projects));
-  } catch (e) {
-    alert('Storage is full. Try deleting old conversations or project files.');
+    return true;
+  } catch {
+    if (reportError) alert('Could not save project history. Try freeing browser storage.');
+    return false;
   }
 }
 
@@ -598,21 +693,16 @@ function renderProjectFileList() {
   const container = els.projectFileList;
   container.innerHTML = '';
   state.pendingProjectFiles.forEach((file, index) => {
-    const entry = document.createElement('div');
-    entry.className = 'project-file-entry';
-    const ext = file.name.split('.').pop().toUpperCase().slice(0, 4);
-    entry.innerHTML = `
-      <div class="file-info">
-        <div class="file-icon">${ext}</div>
-        <span class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
-        <span class="file-size">${formatFileSize(file.size)}</span>
-      </div>
-      <button class="remove-file-btn" title="Remove">&times;</button>
-    `;
-    entry.querySelector('.remove-file-btn').addEventListener('click', () => {
+    const entry = makeElement('div', 'project-file-entry');
+    const info = makeElement('div', 'file-info');
+    info.append(fileIcon(file.name), fileNameEl('span', file.name), makeElement('span', 'file-size', formatFileSize(file.size)));
+    const remove = makeElement('button', 'remove-file-btn', '×');
+    remove.title = 'Remove';
+    remove.addEventListener('click', () => {
       state.pendingProjectFiles.splice(index, 1);
       renderProjectFileList();
     });
+    entry.append(info, remove);
     container.appendChild(entry);
   });
 }
@@ -709,7 +799,7 @@ function renderSidebarContent() {
   header.className = 'project-header';
   header.innerHTML = `
     <div class="project-header-top">
-      <h3 title="${escapeHtml(project.name)}">${escapeHtml(project.name)}</h3>
+      <h3></h3>
       <div class="project-header-actions">
         <button class="edit-project-btn" title="Edit project">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -718,8 +808,11 @@ function renderSidebarContent() {
         </button>
       </div>
     </div>
-    ${project.description ? `<div class="project-description">${escapeHtml(project.description)}</div>` : ''}
   `;
+  const name = header.querySelector('h3');
+  name.textContent = project.name;
+  name.title = project.name;
+  if (project.description) header.appendChild(makeElement('div', 'project-description', project.description));
   header.querySelector('.edit-project-btn').addEventListener('click', () => openEditProjectModal(project.id));
   container.appendChild(header);
 
@@ -727,12 +820,11 @@ function renderSidebarContent() {
   if (project.files.length > 0) {
     const filesSection = document.createElement('div');
     filesSection.className = 'project-files-section';
-    filesSection.innerHTML = `<div class="section-label">Files (${project.files.length})</div>`;
+    filesSection.appendChild(makeElement('div', 'section-label', `Files (${project.files.length})`));
     project.files.forEach((file) => {
       const fileItem = document.createElement('div');
       fileItem.className = 'project-file-item';
-      const ext = file.name.split('.').pop().toUpperCase().slice(0, 4);
-      fileItem.innerHTML = `<div class="file-icon">${ext}</div><span>${escapeHtml(file.name)}</span>`;
+      fileItem.append(fileIcon(file.name), makeElement('span', '', file.name));
       filesSection.appendChild(fileItem);
     });
     container.appendChild(filesSection);
@@ -761,13 +853,14 @@ function renderConversationListInto(container, conversations) {
     const div = document.createElement('div');
     div.className = `conv-item${conv.id === state.currentConvId ? ' active' : ''}`;
     div.innerHTML = `
-      <span class="conv-title">${escapeHtml(conv.title)}</span>
+      <span class="conv-title"></span>
       <button class="conv-delete" title="Delete">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
         </svg>
       </button>
     `;
+    div.querySelector('.conv-title').textContent = conv.title;
     div.addEventListener('click', () => loadConversation(conv.id));
     div.querySelector('.conv-delete').addEventListener('click', (e) => deleteConversation(conv.id, e));
     container.appendChild(div);
@@ -777,6 +870,8 @@ function renderConversationListInto(container, conversations) {
 // ===== Conversations =====
 function newChat() {
   state.currentConvId = null;
+  state.pendingPreferenceRestore = false;
+  updateModelControls(null);
   clearAttachments();
   renderMessages([]);
   els.welcome.classList.remove('hidden');
@@ -784,29 +879,13 @@ function newChat() {
   els.messageInput.focus();
 }
 
-function createConversation(firstMessage) {
-  const conv = {
+function createConversation(firstMessage, message) {
+  return {
     id: generateId('conv'),
     title: firstMessage.slice(0, 80),
-    messages: [],
-    model: state.selectedModel,
+    messages: [message],
     createdAt: Date.now(),
   };
-
-  if (state.currentProjectId) {
-    const project = getCurrentProject();
-    if (project) {
-      project.conversations.unshift(conv);
-      saveProjects();
-    }
-  } else {
-    state.conversations.unshift(conv);
-    saveConversations();
-  }
-
-  state.currentConvId = conv.id;
-  renderSidebarContent();
-  return conv;
 }
 
 function getCurrentConv() {
@@ -819,14 +898,32 @@ function loadConversation(id) {
   const conv = getCurrentConv();
   if (!conv) return;
 
-  if (conv.model && state.models.find((m) => m.id === conv.model)) {
-    els.modelSelector.value = conv.model;
-    state.selectedModel = conv.model;
-    updateModelLabel();
-  }
-
+  restoreConversationPreference(conv);
   renderMessages(conv.messages);
   renderSidebarContent();
+}
+
+function queryPreference(message) {
+  const preference = message.role === 'user' && message.turn?.preference;
+  if (!preference || typeof preference.model !== 'string' || !preference.model.trim()) return null;
+  return preference.effort === null || reasoningEfforts.includes(preference.effort) ? preference : null;
+}
+
+function latestQueryPreference(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const preference = queryPreference(messages[i]);
+    if (preference) return preference;
+  }
+  return null;
+}
+
+function restoreConversationPreference(conv) {
+  const preference = conv && latestQueryPreference(conv.messages);
+  state.pendingPreferenceRestore = Boolean(preference && !state.models.length);
+  if (!preference || !state.models.some((model) => model.id === preference.model)) return;
+  els.modelSelector.value = preference.model;
+  state.selectedModel = preference.model;
+  updateModelControls(preference.effort);
 }
 
 function deleteConversation(id, e) {
@@ -849,7 +946,7 @@ function deleteConversation(id, e) {
   renderSidebarContent();
 }
 
-function saveConversations() {
+function saveConversations(reportError = true) {
   state.conversations.forEach((conv) => {
     conv.messages.forEach((msg, idx) => {
       if (msg.attachmentMeta && idx < conv.messages.length - 10) {
@@ -859,79 +956,145 @@ function saveConversations() {
   });
   try {
     localStorage.setItem('openrouter_conversations', JSON.stringify(state.conversations));
-  } catch (e) {
-    alert('Storage is full. Try deleting old conversations.');
+    return true;
+  } catch {
+    if (reportError) alert('Could not save chat history. Try freeing browser storage.');
+    return false;
   }
 }
 
 // ===== Messages =====
+const missingReplyText = 'Response missing or not received.';
+
+function hasReplyText(content) {
+  return extractTextFromContent(content).trim().length > 0;
+}
+
+function savedTurn(message) {
+  return message.turn && typeof message.turn === 'object' && !Array.isArray(message.turn) ? message.turn : null;
+}
+
+function changedPreference(previous, preference) {
+  return preference && (!previous || previous.model !== preference.model || previous.effort !== preference.effort)
+    ? preference : null;
+}
+
+function conversationRows(messages) {
+  const rows = [];
+  let previous = null;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    rows.push({ message });
+    if (message.role !== 'user') continue;
+
+    const preference = queryPreference(message);
+    const footer = changedPreference(previous, preference);
+    if (preference) previous = preference;
+    const turn = savedTurn(message);
+    if (turn) {
+      rows.push({ turn, footer });
+    } else {
+      const reply = messages[i + 1];
+      if (reply?.role === 'assistant') {
+        i++;
+        if (hasReplyText(reply.content)) {
+          rows.push({ message: reply });
+          continue;
+        }
+      }
+      rows.push({ turn: { status: 'missing' }, footer });
+    }
+  }
+  return rows;
+}
+
 function renderMessages(messages) {
   els.messages.innerHTML = '';
   if (messages.length === 0) {
-    els.messages.appendChild(els.welcome || createWelcomeEl());
-    els.welcome = $('#welcome');
+    els.messages.appendChild(els.welcome);
     els.welcome.classList.remove('hidden');
-    $$('.hint-card').forEach((card) => {
-      card.addEventListener('click', () => {
-        els.messageInput.value = card.dataset.prompt;
-        autoResize();
-        els.messageInput.focus();
-      });
-    });
     return;
   }
 
   els.welcome && els.welcome.classList.add('hidden');
-  messages.forEach((msg) => {
-    appendMessageEl(msg.role, msg.content, msg.attachmentMeta, msg.displayText);
+  conversationRows(messages).forEach(({ message, turn, footer }) => {
+    if (turn) appendTurnReply(turn, footer);
+    else appendMessageEl(message.role, message.content, message.attachmentMeta, message.displayText);
   });
   scrollToBottom();
+}
+
+function appendTurnReply(turn, footer) {
+  const element = appendMessageEl('assistant', '');
+  renderTurnReply(element, turn, footer);
+  return element;
+}
+
+function renderTurnReply(element, turn, footer) {
+  const content = element.querySelector('.message-content');
+  const active = state.activeRequest?.turn === turn;
+  const text = active ? state.activeRequest.text : turn.content;
+  const hasText = hasReplyText(text);
+  element.classList.toggle('streaming', active);
+  content.classList.toggle('missing-reply', !active && !hasText);
+
+  if (active) {
+    renderPlainText(content, text || '');
+    state.activeRequest.contentEl = content;
+  } else if (hasText) {
+    renderAssistantReply(content, text);
+  } else {
+    renderPlainText(content, missingReplyText);
+    if (turn.interruption) content.title = turn.interruption;
+  }
+
+  const notes = [];
+  if (footer) {
+    notes.push(typeof footer.modelName === 'string' && footer.modelName ? footer.modelName : footer.model);
+    if (footer.effort === 'none') notes.push('Effort: None');
+    else if (footer.effort) notes.push(`${reasoningEffortLabels[footer.effort]} effort`);
+  }
+  if (!active && hasText && turn.status !== 'complete') notes.push('Reply interrupted');
+  if (!active && Number.isFinite(turn.elapsedMs)) notes.push(`${(turn.elapsedMs / 1000).toFixed(1)}s`);
+  element.querySelector('.message-meta')?.remove();
+  if (notes.length) {
+    const meta = makeElement('div', 'message-meta', notes.join(' · '));
+    if (footer) meta.title = `Requested model: ${footer.model}`;
+    element.querySelector('.message-body').appendChild(meta);
+  }
+  if (active) state.activeRequest.replyEl = element;
 }
 
 function appendMessageEl(role, content, attachmentMeta, displayText) {
   if (els.welcome) els.welcome.classList.add('hidden');
 
-  const div = document.createElement('div');
-  div.className = `message ${role}`;
-  const avatarLabel = role === 'user' ? 'U' : 'AI';
-
-  div.innerHTML = `
-    <div class="message-avatar">${avatarLabel}</div>
-    <div class="message-body">
-      <div class="message-attachments"></div>
-      <div class="message-content"></div>
-    </div>
-  `;
-
-  const attachmentsEl = div.querySelector('.message-attachments');
-  const contentEl = div.querySelector('.message-content');
+  const assistant = role === 'assistant';
+  const div = makeElement('div', assistant ? 'message assistant' : 'message user');
+  const avatar = makeElement('div', 'message-avatar', assistant ? 'AI' : 'U');
+  const body = makeElement('div', 'message-body');
+  const attachmentsEl = makeElement('div', 'message-attachments');
+  const contentEl = makeElement('div', 'message-content');
+  body.append(attachmentsEl, contentEl);
+  div.append(avatar, body);
 
   if (attachmentMeta && attachmentMeta.length > 0) {
     attachmentMeta.forEach((att) => {
-      if (att.category === 'image' && att.dataUrl) {
-        const img = document.createElement('img');
-        img.src = att.dataUrl;
-        img.alt = att.name;
-        img.title = att.name;
-        img.addEventListener('click', () => window.open(att.dataUrl, '_blank'));
+      const img = attachmentImage(att);
+      if (img) {
         attachmentsEl.appendChild(img);
       } else {
-        const fileEl = document.createElement('div');
-        fileEl.className = 'message-attachment-file';
-        const ext = att.name.split('.').pop().toUpperCase().slice(0, 4);
-        fileEl.innerHTML = `<div class="file-icon">${ext}</div><span>${escapeHtml(att.name)}</span>`;
+        const fileEl = makeElement('div', 'message-attachment-file');
+        fileEl.append(fileIcon(att.name), makeElement('span', '', att.name));
         attachmentsEl.appendChild(fileEl);
       }
     });
   }
 
-  if (role === 'assistant') {
-    const textContent = extractTextFromContent(content);
-    contentEl.innerHTML = renderMarkdown(textContent || '');
-    addCopyButtons(contentEl);
+  if (assistant) {
+    renderAssistantReply(contentEl, extractTextFromContent(content));
   } else {
     const userText = displayText !== undefined ? displayText : extractTextFromContent(content);
-    if (userText) contentEl.textContent = userText;
+    renderPlainText(contentEl, userText);
   }
 
   els.messages.appendChild(div);
@@ -942,18 +1105,47 @@ function appendMessageEl(role, content, attachmentMeta, displayText) {
 function extractTextFromContent(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content.filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+    return content.filter((p) => p?.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('\n');
   }
   return '';
 }
 
-function renderMarkdown(text) {
-  if (!text) return '';
+function renderPlainText(container, text) {
+  container.classList.add('plain-text');
+  container.textContent = text;
+}
+
+function renderAssistantReply(container, text) {
+  if (!text) return;
   try {
-    const html = marked.parse(text, { breaks: true, gfm: true });
-    return DOMPurify.sanitize(html);
+    const markdown = new marked.Marked({
+      breaks: true,
+      gfm: true,
+      renderer: {
+        // Drop raw HTML and remote media before DOMPurify builds a fragment.
+        html: () => '',
+        image: () => '',
+      },
+    });
+    if (!DOMPurify.isSupported) throw new Error('Markdown sanitizer is unavailable');
+    const fragment = DOMPurify.sanitize(markdown.parse(text), {
+      ALLOWED_TAGS: ['a', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'hr', 'li', 'ol', 'p', 'pre', 'strong', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul'],
+      ALLOWED_ATTR: ['align', 'class', 'href', 'start', 'title'],
+      ALLOWED_URI_REGEXP: /^https?:\/\//i,
+      ALLOW_ARIA_ATTR: false,
+      ALLOW_DATA_ATTR: false,
+      RETURN_DOM_FRAGMENT: true,
+    });
+    fragment.querySelectorAll('a[href]').forEach((link) => {
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+    });
+    addCopyButtons(fragment);
+    container.classList.remove('plain-text');
+    container.replaceChildren(fragment);
   } catch {
-    return escapeHtml(text);
+    renderPlainText(container, text);
   }
 }
 
@@ -963,36 +1155,31 @@ function addCopyButtons(container) {
     if (!code) return;
     const langClass = [...code.classList].find((c) => c.startsWith('language-'));
     const lang = langClass ? langClass.replace('language-', '') : 'code';
-    const header = document.createElement('div');
-    header.className = 'code-header';
-    header.innerHTML = `
-      <span>${lang}</span>
-      <button class="copy-btn" onclick="copyCode(this)">
+    const header = makeElement('div', 'code-header');
+    const btn = makeElement('button', 'copy-btn');
+    btn.type = 'button';
+    btn.innerHTML = `
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
         </svg>
-        Copy
-      </button>
     `;
+    const label = makeElement('span', '', 'Copy');
+    btn.appendChild(label);
+    let resetLabel;
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(code.textContent);
+        label.textContent = 'Copied!';
+      } catch {
+        label.textContent = 'Copy failed';
+      }
+      clearTimeout(resetLabel);
+      resetLabel = setTimeout(() => { label.textContent = 'Copy'; }, 1500);
+    });
+    header.append(makeElement('span', '', lang), btn);
     pre.insertBefore(header, pre.firstChild);
   });
 }
-
-window.copyCode = function (btn) {
-  const pre = btn.closest('pre');
-  const code = pre.querySelector('code');
-  navigator.clipboard.writeText(code.textContent).then(() => {
-    btn.textContent = 'Copied!';
-    setTimeout(() => {
-      btn.innerHTML = `
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-        Copy
-      `;
-    }, 1500);
-  });
-};
 
 function scrollToBottom() {
   els.messagesContainer.scrollTop = els.messagesContainer.scrollHeight;
@@ -1045,30 +1232,46 @@ function buildApiMessages(conv) {
 
   // 3. Conversation messages
   conv.messages.forEach((m) => {
-    messages.push({ role: m.role, content: m.content });
+    if (m.role === 'user') {
+      messages.push({ role: m.role, content: m.content });
+      const turn = savedTurn(m);
+      if (hasReplyText(turn?.content)) messages.push({ role: 'assistant', content: turn.content });
+    } else if (m.role === 'assistant' && hasReplyText(m.content)) {
+      messages.push({ role: m.role, content: m.content });
+    }
   });
 
   return messages;
 }
 
 // ===== Send Message =====
+const replyTimeoutMs = 120_000;
+const replyCheckpointMs = 2_000;
+
 async function sendMessage() {
   const text = els.messageInput.value.trim();
   const attachments = [...state.pendingAttachments];
 
-  if ((!text && attachments.length === 0) || state.isStreaming) return;
+  if ((!text && attachments.length === 0) || state.activeRequest) return;
 
-  if (!state.apiKey) {
+  const credential = state.credential;
+  if (!credential) {
     openSettings();
     return;
   }
 
-  const displayText = text || '(attached files)';
-  if (!state.currentConvId) {
-    createConversation(displayText);
-  }
-
-  const conv = getCurrentConv();
+  const model = state.models.find((entry) => entry.id === state.selectedModel);
+  if (!model) return;
+  const effort = els.reasoningEffort.value;
+  const preference = {
+    model: model.id,
+    modelName: model.name || model.id,
+    effort: modelReasoningEfforts(model).includes(effort) ? effort : null,
+  };
+  const projectId = state.currentProjectId;
+  const conversations = getActiveConversations();
+  const existing = getCurrentConv();
+  const footer = changedPreference(existing ? latestQueryPreference(existing.messages) : null, preference);
 
   // Build content for API
   let apiContent;
@@ -1093,10 +1296,12 @@ async function sendMessage() {
     apiContent = text;
   }
 
+  const turn = { id: generateId('turn'), preference, status: 'pending' };
   const storedMessage = {
     role: 'user',
     content: apiContent,
     displayText: text,
+    turn,
     attachmentMeta: attachments.length > 0
       ? attachments.map((a) => ({
           name: a.name, size: a.size, category: a.category,
@@ -1104,9 +1309,18 @@ async function sendMessage() {
         }))
       : undefined,
   };
-  conv.messages.push(storedMessage);
-  conv.model = state.selectedModel;
-  saveCurrentConversations();
+  const conv = existing || createConversation(text || '(attached files)', storedMessage);
+  if (existing) conv.messages.push(storedMessage);
+  else conversations.unshift(conv);
+  if (!saveConversationHistory(projectId)) {
+    if (existing) conv.messages.pop();
+    else conversations.shift();
+    return;
+  }
+  if (!existing) {
+    state.currentConvId = conv.id;
+    renderSidebarContent();
+  }
 
   appendMessageEl('user', apiContent, storedMessage.attachmentMeta, text);
   els.messageInput.value = '';
@@ -1117,114 +1331,216 @@ async function sendMessage() {
   const apiMessages = buildApiMessages(conv);
 
   // Start streaming
-  state.isStreaming = true;
+  const controller = new AbortController();
+  const request = { controller, turn, text: '' };
+  state.activeRequest = request;
   els.sendBtn.classList.add('hidden');
   els.stopBtn.classList.remove('hidden');
   els.messageInput.disabled = true;
 
-  const assistantDiv = appendMessageEl('assistant', '');
-  assistantDiv.classList.add('streaming');
-  const contentEl = assistantDiv.querySelector('.message-content');
-
-  let fullResponse = '';
+  appendTurnReply(turn, footer);
+  scrollToBottom();
   const startTime = Date.now();
+  let lastCheckpoint = -Infinity;
+  let timeout;
+  let reader;
+  let completed = false;
+  let interruption = 'The reply stream ended early.';
+  const resetTimeout = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort(new DOMException('The reply timed out.', 'TimeoutError')), replyTimeoutMs);
+  };
+  const saveReply = (reportError) => {
+    const owner = projectId ? getProject(projectId)?.conversations : state.conversations;
+    if (owner?.includes(conv)) saveConversationHistory(projectId, reportError);
+  };
 
   try {
-    state.abortController = new AbortController();
+    resetTimeout();
 
+    const payload = { model: preference.model, messages: apiMessages };
+    if (preference.effort !== null) payload.reasoning = { effort: preference.effort };
     const res = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Api-Key': state.apiKey },
-      body: JSON.stringify({ model: state.selectedModel, messages: apiMessages }),
-      signal: state.abortController.signal,
+      headers: { 'Content-Type': 'application/json', ...credentialHeaders(credential) },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
     });
 
     if (!res.ok) {
-      const errData = await res.text();
-      throw new Error(errData || `HTTP ${res.status}`);
+      const data = await res.json().catch(() => null);
+      rejectInvalidSavedKey(credential, res, data);
+      throw new Error('The request failed.');
     }
 
-    const reader = res.body.getReader();
+    reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
+    stream: while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      buffer += done ? `${decoder.decode()}\n` : decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') {
+          completed = true;
+          break stream;
+        }
+        let event;
         try {
-          const parsed = JSON.parse(data);
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) {
-            fullResponse += delta;
-            contentEl.innerHTML = renderMarkdown(fullResponse);
-            scrollToBottom();
+          event = JSON.parse(data);
+        } catch { continue; }
+        if (event?.error || event?.choices?.[0]?.finish_reason === 'error') throw new Error('The reply stream failed.');
+        const delta = event?.choices?.[0]?.delta?.content;
+        if (typeof delta !== 'string' || !delta) continue;
+        request.text += delta;
+        if (delta.trim()) {
+          resetTimeout();
+          const now = Date.now();
+          if (now - lastCheckpoint >= replyCheckpointMs) {
+            turn.content = request.text;
+            saveReply(false);
+            lastCheckpoint = now;
           }
-        } catch { /* skip malformed chunks */ }
+        }
+        if (request.contentEl.isConnected) {
+          renderPlainText(request.contentEl, request.text);
+          scrollToBottom();
+        }
       }
+      if (done) break;
     }
-
-    addCopyButtons(contentEl);
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const metaDiv = document.createElement('div');
-    metaDiv.className = 'message-meta';
-    metaDiv.textContent = `${elapsed}s`;
-    assistantDiv.querySelector('.message-body').appendChild(metaDiv);
-
-    conv.messages.push({ role: 'assistant', content: fullResponse });
-    saveCurrentConversations();
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      if (fullResponse) {
-        conv.messages.push({ role: 'assistant', content: fullResponse });
-        saveCurrentConversations();
-      }
-    } else {
-      contentEl.innerHTML = `<div class="message-error">Error: ${escapeHtml(err.message)}</div>`;
-    }
+  } catch {
+    interruption = controller.signal.reason?.name === 'TimeoutError' ? 'The reply timed out.'
+      : controller.signal.aborted ? 'The reply was stopped.' : 'The request or reply stream failed.';
   } finally {
-    assistantDiv.classList.remove('streaming');
-    state.isStreaming = false;
-    state.abortController = null;
+    clearTimeout(timeout);
+    reader?.cancel().catch(() => {});
+    const hasText = hasReplyText(request.text);
+    turn.status = hasText ? completed ? 'complete' : 'interrupted' : 'missing';
+    if (hasText) turn.content = request.text;
+    if (!completed || !hasText) turn.interruption = completed ? 'The stream returned no reply text.' : interruption;
+    if (hasText) turn.elapsedMs = Date.now() - startTime;
+    state.activeRequest = null;
+    saveReply(true);
+    if (request.replyEl.isConnected) {
+      renderTurnReply(request.replyEl, turn, footer);
+      scrollToBottom();
+    }
     els.sendBtn.classList.remove('hidden');
     els.stopBtn.classList.add('hidden');
-    els.messageInput.disabled = false;
+    els.messageInput.disabled = !state.credential;
     els.messageInput.focus();
   }
 }
 
 function stopStreaming() {
-  if (state.abortController) state.abortController.abort();
+  state.activeRequest?.controller.abort();
 }
 
 // ===== Settings =====
 function openSettings() {
   els.settingsModal.classList.remove('hidden');
-  els.apiKeyInput.value = state.apiKey;
+  els.apiKeyInput.placeholder = state.credential ? 'Key in use; leave blank to keep it' : 'sk-or-v1-...';
+  els.rememberKey.checked = state.savedKey !== null;
+  updateRememberKeyDescription();
+  els.apiKeyStatus.textContent = state.keyNotice;
   els.systemPromptInput.value = state.systemPrompt;
+  state.draftTheme = state.theme;
+  $$('.theme-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.theme === state.theme));
   els.apiKeyInput.focus();
 }
 
+function updateRememberKeyDescription() {
+  els.rememberKeyDesc.textContent = els.rememberKey.checked
+    ? 'On: Best choice for a private machine'
+    : 'Off: Best choice for a public machine';
+}
+
 function closeSettings() {
+  if (state.savingSettings) return;
+  els.apiKeyInput.value = '';
+  els.apiKeyInput.type = 'password';
   els.settingsModal.classList.add('hidden');
 }
 
-function saveSettings() {
-  const newKey = els.apiKeyInput.value.trim();
-  const keyChanged = newKey !== state.apiKey;
-  state.apiKey = newKey;
-  state.systemPrompt = els.systemPromptInput.value.trim();
-  localStorage.setItem('openrouter_api_key', state.apiKey);
-  localStorage.setItem('openrouter_system_prompt', state.systemPrompt);
-  applyTheme(state.theme);
-  if (keyChanged && state.apiKey) fetchModels();
+async function saveSettings() {
+  if (state.savingSettings) return;
+  const enteredKey = els.apiKeyInput.value.trim();
+  const remember = els.rememberKey.checked;
+  if (enteredKey && (enteredKey.length > 512 || /[^!-~]/.test(enteredKey))) {
+    els.apiKeyStatus.textContent = 'Enter a valid OpenRouter API key without spaces.';
+    return;
+  }
+  const previous = state.credential;
+  const systemPrompt = els.systemPromptInput.value.trim();
+  const theme = state.draftTheme;
+  let credential = previous;
+  let savedKey = state.savedKey;
+  let saved = false;
+  state.savingSettings = true;
+  els.saveSettings.disabled = true;
+  els.apiKeyInput.disabled = true;
+  els.rememberKey.disabled = true;
+  try {
+    if (remember && (enteredKey || savedKey === null)) {
+      const apiKey = enteredKey || (previous?.header === 'X-Api-Key' ? previous.value : '');
+      if (apiKey) {
+        const res = await fetch('/api/credentials', {
+          method: 'POST',
+          headers: { 'X-Api-Key': apiKey },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!res.ok) throw new Error('Encryption failed');
+        ({ savedKey } = await res.json());
+        if (typeof savedKey !== 'string' || !/^v1\.[\w-]+$/.test(savedKey)) throw new Error('Invalid encrypted key response');
+        credential = { header: 'X-Saved-Key', value: savedKey };
+      } else if (previous?.header === 'X-Saved-Key') {
+        // The same tab can re-enable remembering after turning it off.
+        savedKey = previous.value;
+      } else {
+        els.apiKeyStatus.textContent = 'Enter your OpenRouter API key before turning on remembering.';
+        return;
+      }
+      localStorage.setItem(savedKeyStorage, savedKey);
+    } else if (!remember) {
+      if (savedKey !== null) localStorage.removeItem(savedKeyStorage);
+      savedKey = null;
+      if (enteredKey) credential = { header: 'X-Api-Key', value: enteredKey };
+    }
+    state.savedKey = savedKey;
+    state.credential = credential;
+    saved = true;
+  } catch {
+    els.apiKeyStatus.textContent = 'Could not change how the key is saved. The previous key setting is unchanged.' +
+      (remember ? ' To use the entered key for this tab only, switch remembering off and save again.' : '');
+  } finally {
+    state.savingSettings = false;
+    els.saveSettings.disabled = false;
+    els.apiKeyInput.disabled = false;
+    els.rememberKey.disabled = false;
+  }
+  if (!saved) return;
+
+  const retry = Boolean(state.keyNotice);
+  if (previous !== credential || savedKey === null) showKeyNotice('');
+  try {
+    localStorage.setItem('openrouter_system_prompt', systemPrompt);
+    state.systemPrompt = systemPrompt;
+    applyTheme(theme);
+    state.theme = theme;
+  } catch {
+    els.apiKeyStatus.textContent = 'The API key setting was applied, but other settings could not be saved.';
+    els.apiKeyInput.value = '';
+    els.apiKeyInput.type = 'password';
+    if (credential && (previous !== credential || retry)) fetchModels();
+    return;
+  }
   closeSettings();
+  if (credential && (previous !== credential || retry)) fetchModels();
 }
 
 // ===== Start =====
