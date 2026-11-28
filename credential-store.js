@@ -25,16 +25,30 @@ function createCredentialStore(directory = path.join(homedir(), '.openrouter-cha
   const keyFile = path.join(directory, 'credential-key-v1');
 
   async function readKey() {
-    const entry = await lstat(keyFile);
+    const entry = await lstat(keyFile, windows ? { bigint: true } : undefined);
     if (!entry.isFile()) throw new Error('Invalid credential key file');
     assertPrivate(entry);
     const file = await open(keyFile, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
     try {
       const stat = await file.stat();
       assertPrivate(stat);
-      if (!stat.isFile() || stat.size !== keySize || stat.ino !== entry.ino || stat.dev !== entry.dev) {
+      if (!stat.isFile() || stat.size !== keySize) throw new Error('Invalid credential key file');
+
+      if (windows) {
+        // Windows path and handle stats can report different IDs for the same file.
+        // Recheck the path using the same API; this is not an atomic no-follow open.
+        const current = await lstat(keyFile, { bigint: true }).catch((err) => {
+          if (err.code === 'ENOENT') return null;
+          throw err;
+        });
+        if (!current?.isFile() || current.dev !== entry.dev || current.ino !== entry.ino ||
+            current.size !== BigInt(keySize)) {
+          throw new Error('Invalid credential key file');
+        }
+      } else if (stat.ino !== entry.ino || stat.dev !== entry.dev) {
         throw new Error('Invalid credential key file');
       }
+
       const key = await file.readFile();
       if (key.length !== keySize) throw new Error('Invalid credential key file');
       return key;
